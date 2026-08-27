@@ -66,6 +66,23 @@ async function setup(playerCount = 2) {
   return { code: room.code, host, others };
 }
 
+describe("Supabase 설정이 없는 환경", () => {
+  it("환경변수가 없어도 방을 만들고 이어서 읽을 수 있다", async () => {
+    // 자동 선택 경로를 그대로 타게 하려고 주입한 백엔드를 치운다.
+    setRoomBackend(null);
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "");
+    vi.stubEnv("SUPABASE_SECRET_KEY", "");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { room, player } = await createRoom("호스트");
+    const reloaded = await getRoom(room.code);
+    expect(reloaded?.code).toBe(room.code);
+    expect(reloaded?.players[0].id).toBe(player.id);
+
+    vi.unstubAllEnvs();
+  });
+});
+
 describe("createRoom / joinRoom", () => {
   it("creates a room with the host as the sole lobby player", async () => {
     const { room, player } = await createRoom("호스트");

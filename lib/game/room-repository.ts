@@ -112,13 +112,6 @@ const supabaseBackend: RoomBackend = {
   },
 };
 
-let backend: RoomBackend = supabaseBackend;
-
-/** 테스트에서 인메모리 백엔드를 끼우기 위한 훅. null이면 Supabase로 되돌린다. */
-export function setRoomBackend(next: RoomBackend | null): void {
-  backend = next ?? supabaseBackend;
-}
-
 /**
  * DB 없이 방 로직을 검증할 때 쓰는 인메모리 백엔드. 저장 시 깊은 복사를
  * 하므로 실제 직렬화 경계와 같은 방식으로 동작한다.
@@ -148,17 +141,66 @@ export function createInMemoryRoomBackend(): RoomBackend {
   };
 }
 
+function isSupabaseConfigured(): boolean {
+  return Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SECRET_KEY);
+}
+
+/**
+ * Supabase 설정이 없을 때 쓰는 인메모리 백엔드는 globalThis에 캐싱한다.
+ * 모듈이 재평가되는(개발 중 HMR 등) 경우에도 같은 저장소를 계속 쓰게 해서
+ * 방이 불필요하게 사라지는 일을 줄인다.
+ */
+const FALLBACK_KEY = "__chosungFallbackRoomBackend";
+
+function getFallbackBackend(): RoomBackend {
+  const globalScope = globalThis as typeof globalThis & {
+    [FALLBACK_KEY]?: RoomBackend;
+  };
+  globalScope[FALLBACK_KEY] ??= createInMemoryRoomBackend();
+  return globalScope[FALLBACK_KEY];
+}
+
+let warnedAboutFallback = false;
+
+/**
+ * 실제로 쓸 백엔드를 고른다. Supabase 설정이 있으면 그쪽에 저장해 서버
+ * 재시작이나 인스턴스 교체에도 방이 살아남는다. 설정이 없으면 예외를
+ * 던지는 대신 인메모리로 떨어뜨려, 환경변수를 채우지 않은 환경에서도
+ * 게임이 그대로 동작하게 한다.
+ */
+function resolveBackend(): RoomBackend {
+  if (injectedBackend) return injectedBackend;
+  if (isSupabaseConfigured()) return supabaseBackend;
+
+  if (!warnedAboutFallback) {
+    warnedAboutFallback = true;
+    console.warn(
+      "[room-store] Supabase 설정이 없어 방 상태를 메모리에 보관합니다. " +
+        "서버가 재시작되거나 인스턴스가 여러 개면 진행 중인 방이 사라질 수 있습니다. " +
+        "NEXT_PUBLIC_SUPABASE_URL과 SUPABASE_SECRET_KEY를 설정하면 영속 저장으로 전환됩니다.",
+    );
+  }
+  return getFallbackBackend();
+}
+
+let injectedBackend: RoomBackend | null = null;
+
+/** 테스트에서 백엔드를 직접 끼우기 위한 훅. null이면 자동 선택으로 되돌린다. */
+export function setRoomBackend(next: RoomBackend | null): void {
+  injectedBackend = next;
+}
+
 export async function loadRoom(code: string): Promise<LoadedRoom | null> {
-  return backend.load(code);
+  return resolveBackend().load(code);
 }
 
 export async function insertRoom(room: Room): Promise<void> {
-  return backend.insert(room);
+  return resolveBackend().insert(room);
 }
 
 /** 코드 중복 여부만 확인한다. 방 코드를 새로 뽑을 때 충돌을 피하는 데 쓴다. */
 export async function roomCodeExists(code: string): Promise<boolean> {
-  return backend.exists(code);
+  return resolveBackend().exists(code);
 }
 
 /**
@@ -173,13 +215,14 @@ export async function mutateRoom<T>(
   mutate: (room: Room) => { result: T; persist: boolean },
 ): Promise<{ room: Room; result: T } | null> {
   for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt += 1) {
-    const loaded = await backend.load(code);
+    const active = resolveBackend();
+    const loaded = await active.load(code);
     if (!loaded) return null;
 
     const { result, persist } = mutate(loaded.room);
     if (!persist) return { room: loaded.room, result };
 
-    const saved = await backend.saveIfUnchanged(loaded.room, loaded.version);
+    const saved = await active.saveIfUnchanged(loaded.room, loaded.version);
     if (saved) return { room: loaded.room, result };
   }
 
