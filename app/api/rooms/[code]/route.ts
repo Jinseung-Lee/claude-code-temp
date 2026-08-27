@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getRoomView } from "@/lib/game/room-store";
+import { getRoom, serializeForPlayer } from "@/lib/game/room-store";
 
 export async function GET(
   request: NextRequest,
@@ -8,10 +8,13 @@ export async function GET(
   const { code } = await params;
   const playerId = request.nextUrl.searchParams.get("playerId") ?? "";
 
-  const result = await getRoomView(code, playerId);
-  if ("error" in result) {
-    return NextResponse.json({ error: result.error }, { status: result.status });
+  const room = getRoom(code);
+  if (!room) {
+    return NextResponse.json({ error: "존재하지 않는 방입니다." }, { status: 404 });
+  }
+  if (!room.players.some((p) => p.id === playerId)) {
+    return NextResponse.json({ error: "이 방의 참가자가 아닙니다." }, { status: 403 });
   }
 
-  return NextResponse.json(result.view);
+  return NextResponse.json(serializeForPlayer(room, playerId));
 }

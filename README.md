@@ -14,20 +14,10 @@ Next.js 16 (App Router) · React 19 · Tailwind CSS 4 · shadcn/ui · Bun · Vit
 
 ```bash
 bun install
-cp .env.example .env.local   # Supabase 프로젝트 값을 채운다
 bun dev
 ```
 
 [http://localhost:3000](http://localhost:3000)에서 결과를 확인할 수 있습니다.
-
-### Supabase 설정
-
-멀티플레이 방 상태를 `game_rooms` 테이블에 저장하므로, 초성게임 멀티모드를 쓰려면 Supabase 프로젝트가 필요합니다.
-
-1. `.env.local`에 `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`를 채운다.
-2. `supabase/migrations/`의 SQL을 적용한다. Supabase CLI를 쓰면 `supabase db push`, 아니면 대시보드 SQL 에디터에 붙여 실행한다.
-
-`SUPABASE_SECRET_KEY`는 서버 라우트 핸들러에서만 쓰이며 클라이언트로 나가지 않습니다.
 
 ## 스크립트
 

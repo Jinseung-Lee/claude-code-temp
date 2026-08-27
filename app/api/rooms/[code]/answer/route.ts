@@ -12,7 +12,7 @@ export async function POST(
     return NextResponse.json({ error: "잘못된 요청입니다." }, { status: 400 });
   }
 
-  const result = await submitAnswer(code, playerId, text);
+  const result = submitAnswer(code, playerId, text);
   if ("error" in result) {
     return NextResponse.json({ error: result.error }, { status: 400 });
   }
