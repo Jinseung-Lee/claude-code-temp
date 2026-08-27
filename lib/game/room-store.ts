@@ -1,432 +1,183 @@
-import { getChosung, isCorrectAnswer, maskWordWithIndexes, reverseSyllables } from "./chosung";
-import { ITEM_DEFINITIONS, drawRandomItemType } from "./items";
-import { pickRandomQuestion } from "./questions";
-import { computeRanking } from "./ranking";
 import {
-  CHAT_HISTORY_LIMIT,
-  DELAY_ITEM_MS,
-  MAX_PLAYERS,
-  ROUND_DURATION_MS,
-  ROUND_RESULT_MS,
-  TOTAL_ROUNDS,
-  type ActiveEffect,
-  type ChatMessage,
-  type ClientRoomView,
-  type Difficulty,
-  type ItemQuestionState,
-  type ItemType,
-  type Player,
-  type Room,
-  type RoundState,
-} from "./types";
+  addPlayer,
+  appendChatMessage,
+  applyAnswer,
+  applyItemQuestionAnswer,
+  beginGame,
+  generateRoomCode,
+  makeRoom,
+  serializeForPlayer,
+  tick,
+  useItem,
+} from "./room-logic";
+import { insertRoom, mutateRoom, roomCodeExists } from "./room-repository";
+import type { Difficulty, Player, Room } from "./types";
 
-const rooms = new Map<string, Room>();
+export { serializeForPlayer } from "./room-logic";
 
-const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // 혼동되는 0/O/1/I 제외
+/**
+ * 방 상태 접근 계층. 순수 게임 로직(`room-logic.ts`)과 영속화
+ * (`room-repository.ts`)를 잇는다. 모든 조작은 "읽기 → 로직 적용 →
+ * 낙관적 락 저장"을 한 번에 처리하므로, 동시 요청은 저장 단계에서
+ * 걸러지고 재시도된다.
+ */
 
-function generateRoomCode(): string {
-  let code = "";
-  for (let i = 0; i < 6; i += 1) {
-    code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
+const CODE_GENERATION_ATTEMPTS = 10;
+
+export async function createRoom(hostNickname: string): Promise<{ room: Room; player: Player }> {
+  for (let attempt = 0; attempt < CODE_GENERATION_ATTEMPTS; attempt += 1) {
+    const code = generateRoomCode();
+    if (await roomCodeExists(code)) continue;
+
+    const { room, player } = makeRoom(code, hostNickname);
+    await insertRoom(room);
+    return { room, player };
   }
-  return code;
+  throw new Error("방 코드를 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.");
 }
 
-function makeId(): string {
-  return crypto.randomUUID();
-}
-
-function makePlayer(nickname: string, isHost: boolean): Player {
-  return {
-    id: makeId(),
-    nickname,
-    isHost,
-    joinedAt: Date.now(),
-    roundWins: 0,
-    correctRounds: 0,
-    totalAnswerMs: 0,
-    items: [],
-    activeEffects: [],
-    shieldActive: false,
-  };
-}
-
-function generateItemQuestion(
-  category: string,
-  difficulty: Difficulty,
-  exclude: string[],
-): ItemQuestionState {
-  const question = pickRandomQuestion(category, Math.random, exclude);
-  const { masked, maskedIndexes } = maskWordWithIndexes(question.answer, difficulty);
-  return { answer: question.answer, maskedQuestion: masked, maskedIndexes };
-}
-
-function startNewRound(room: Room, index: number, previousAnswers: string[]): RoundState {
-  const category = room.category ?? "사자성어";
-  const difficulty: Difficulty = room.difficulty ?? "medium";
-  const question = pickRandomQuestion(category, Math.random, previousAnswers);
-  const { masked, maskedIndexes } = maskWordWithIndexes(question.answer, difficulty);
-  const now = Date.now();
-
-  room.players.forEach((player) => {
-    player.activeEffects = [];
-    player.shieldActive = false;
-  });
-
-  const itemQuestions: Record<string, ItemQuestionState> = {};
-  room.players.forEach((player) => {
-    itemQuestions[player.id] = generateItemQuestion(category, difficulty, [question.answer]);
-  });
-
-  return {
-    index,
-    category,
-    difficulty,
-    answer: question.answer,
-    maskedQuestion: masked,
-    maskedIndexes,
-    startedAt: now,
-    durationMs: ROUND_DURATION_MS,
-    winnerId: null,
-    winnerAnswerMs: null,
-    endedAt: null,
-    resultUntil: null,
-    pendingAnswers: [],
-    wrongPlayerIds: [],
-    extraHiddenIndexes: {},
-    itemQuestions,
-  };
-}
-
-function currentRound(room: Room): RoundState | undefined {
-  return room.rounds[room.currentRoundIndex];
+/** tick이 방을 실제로 바꿨는지 판단할 최소 지표. 불필요한 쓰기를 줄인다. */
+function snapshotTimeState(room: Room): string {
+  const round = room.rounds[room.currentRoundIndex];
+  return [
+    room.phase,
+    room.currentRoundIndex,
+    round?.winnerId ?? "",
+    round?.endedAt ?? "",
+    round?.resultUntil ?? "",
+  ].join("|");
 }
 
 /**
- * 방의 시간 기반 상태를 현재 시각 기준으로 갱신한다. 모든 조회·조작
- * 함수는 이 함수를 먼저 호출해 지연 판정, 시간 초과, 라운드 자동 진행을
- * 일관되게 반영한다.
+ * 방을 읽어 시간 기반 상태를 갱신한 뒤 돌려준다. 라운드 자동 진행이
+ * 조회 시점에 일어나므로 갱신 결과도 함께 저장한다.
  */
-function tick(room: Room): void {
-  const now = Date.now();
-
-  if (room.phase === "round_active") {
-    const round = currentRound(room);
-    if (!round) return;
-
-    if (round.winnerId === null) {
-      const eligible = round.pendingAnswers.filter((a) => a.effectiveAt <= now);
-      if (eligible.length > 0) {
-        const winner = eligible.reduce((min, a) => (a.effectiveAt < min.effectiveAt ? a : min));
-        const player = room.players.find((p) => p.id === winner.playerId);
-        if (player) {
-          const answerMs = Math.max(0, winner.effectiveAt - round.startedAt);
-          player.roundWins += 1;
-          player.correctRounds += 1;
-          player.totalAnswerMs += answerMs;
-          player.items.push({ id: makeId(), type: drawRandomItemType() });
-          round.winnerId = player.id;
-          round.winnerAnswerMs = answerMs;
-        }
-        round.endedAt = now;
-        round.resultUntil = now + ROUND_RESULT_MS;
-        room.phase = "round_result";
-      } else if (now >= round.startedAt + round.durationMs) {
-        round.endedAt = now;
-        round.resultUntil = now + ROUND_RESULT_MS;
-        room.phase = "round_result";
-      }
-    }
-  }
-
-  if (room.phase === "round_result") {
-    const round = currentRound(room);
-    if (round?.resultUntil !== null && round?.resultUntil !== undefined && now >= round.resultUntil) {
-      if (room.currentRoundIndex + 1 >= TOTAL_ROUNDS) {
-        room.phase = "finished";
-      } else {
-        const previousAnswers = room.rounds.map((r) => r.answer);
-        room.currentRoundIndex += 1;
-        room.rounds.push(startNewRound(room, room.currentRoundIndex, previousAnswers));
-        room.phase = "round_active";
-      }
-    }
-  }
+export async function getRoom(code: string): Promise<Room | undefined> {
+  const outcome = await mutateRoom(code, (room) => {
+    const before = snapshotTimeState(room);
+    tick(room);
+    return { result: undefined, persist: snapshotTimeState(room) !== before };
+  });
+  return outcome?.room;
 }
 
-export function createRoom(hostNickname: string): { room: Room; player: Player } {
-  const host = makePlayer(hostNickname, true);
-  let code = generateRoomCode();
-  while (rooms.has(code)) code = generateRoomCode();
-
-  const room: Room = {
-    code,
-    hostId: host.id,
-    players: [host],
-    phase: "lobby",
-    category: null,
-    difficulty: null,
-    rounds: [],
-    currentRoundIndex: -1,
-    createdAt: Date.now(),
-    chatMessages: [],
-  };
-  rooms.set(code, room);
-  return { room, player: host };
-}
-
-export function getRoom(code: string): Room | undefined {
-  const room = rooms.get(code.toUpperCase());
-  if (room) tick(room);
-  return room;
-}
-
-export function joinRoom(
+export async function joinRoom(
   code: string,
   nickname: string,
-): { room: Room; player: Player } | { error: string } {
-  const room = rooms.get(code.toUpperCase());
-  if (!room) return { error: "존재하지 않는 방입니다." };
-  tick(room);
-  if (room.phase !== "lobby") return { error: "이미 게임이 시작된 방입니다." };
-  if (room.players.length >= MAX_PLAYERS) return { error: "방 인원이 가득 찼습니다(최대 4인)." };
+  existingPlayerId?: string,
+): Promise<{ room: Room; player: Player } | { error: string }> {
+  const outcome = await mutateRoom(code, (room) => {
+    tick(room);
 
-  const player = makePlayer(nickname, false);
-  room.players.push(player);
-  return { room, player };
+    // 탭을 닫았거나 새로고침으로 연결이 끊긴 참가자는 게임 중에도 같은
+    // playerId로 다시 붙을 수 있어야 한다.
+    if (existingPlayerId) {
+      const existing = room.players.find((p) => p.id === existingPlayerId);
+      if (existing) {
+        return { result: { player: existing }, persist: false };
+      }
+    }
+
+    const result = addPlayer(room, nickname);
+    return { result, persist: !("error" in result) };
+  });
+
+  if (!outcome) return { error: "존재하지 않는 방입니다." };
+  if ("error" in outcome.result) return { error: outcome.result.error };
+  return { room: outcome.room, player: outcome.result.player };
 }
 
-export function startGame(
+export async function startGame(
   code: string,
   actorId: string,
   category: string,
   difficulty: Difficulty,
-): Room | { error: string } {
-  const room = rooms.get(code.toUpperCase());
-  if (!room) return { error: "존재하지 않는 방입니다." };
-  tick(room);
-  if (room.hostId !== actorId) return { error: "방장만 게임을 시작할 수 있습니다." };
-  if (room.phase !== "lobby") return { error: "이미 게임이 시작되었습니다." };
-  if (room.players.length < 2) return { error: "2명 이상 모여야 시작할 수 있습니다." };
-
-  room.category = category;
-  room.difficulty = difficulty;
-  room.currentRoundIndex = 0;
-  room.rounds = [startNewRound(room, 0, [])];
-  room.phase = "round_active";
-  return room;
-}
-
-export function submitAnswer(
-  code: string,
-  playerId: string,
-  text: string,
-): { correct: boolean } | { error: string } {
-  const room = rooms.get(code.toUpperCase());
-  if (!room) return { error: "존재하지 않는 방입니다." };
-  tick(room);
-  if (room.phase !== "round_active") return { error: "라운드가 진행 중이 아닙니다." };
-  const round = currentRound(room);
-  const player = room.players.find((p) => p.id === playerId);
-  if (!round || !player) return { error: "잘못된 요청입니다." };
-  if (round.winnerId !== null) return { correct: false };
-  if (round.pendingAnswers.some((a) => a.playerId === playerId)) return { correct: true };
-
-  const isReversed = player.activeEffects.some((e) => e.itemType === "reverse_input");
-  const expected = isReversed ? reverseSyllables(round.answer) : round.answer;
-  const correct = isCorrectAnswer(text, expected);
-
-  if (!correct) {
-    if (!round.wrongPlayerIds.includes(playerId)) round.wrongPlayerIds.push(playerId);
-    return { correct: false };
-  }
-
-  const isDelayed = player.activeEffects.some((e) => e.itemType === "delay");
-  const submittedAt = Date.now();
-  round.pendingAnswers.push({
-    playerId,
-    submittedAt,
-    effectiveAt: submittedAt + (isDelayed ? DELAY_ITEM_MS : 0),
+): Promise<Room | { error: string }> {
+  const outcome = await mutateRoom(code, (room) => {
+    tick(room);
+    const result = beginGame(room, actorId, category, difficulty);
+    return { result, persist: !("error" in result) };
   });
-  tick(room);
-  return { correct: true };
+
+  if (!outcome) return { error: "존재하지 않는 방입니다." };
+  if ("error" in outcome.result) return { error: outcome.result.error };
+  return outcome.room;
 }
 
-export function submitItemQuestionAnswer(
+export async function submitAnswer(
   code: string,
   playerId: string,
   text: string,
-): { correct: boolean } | { error: string } {
-  const room = rooms.get(code.toUpperCase());
-  if (!room) return { error: "존재하지 않는 방입니다." };
-  tick(room);
-  if (room.phase !== "round_active") return { error: "라운드가 진행 중이 아닙니다." };
-  const round = currentRound(room);
-  const player = room.players.find((p) => p.id === playerId);
-  if (!round || !player) return { error: "잘못된 요청입니다." };
+): Promise<{ correct: boolean } | { error: string }> {
+  const outcome = await mutateRoom(code, (room) => {
+    tick(room);
+    const result = applyAnswer(room, playerId, text);
+    return { result, persist: !("error" in result) };
+  });
 
-  const question = round.itemQuestions[playerId];
-  if (!question) return { error: "아이템 문제가 없습니다." };
-  if (!isCorrectAnswer(text, question.answer)) return { correct: false };
-
-  player.items.push({ id: makeId(), type: drawRandomItemType() });
-  // 계속 도전할 수 있도록 곧바로 새 아이템 문제를 내준다.
-  round.itemQuestions[playerId] = generateItemQuestion(round.category, round.difficulty, [
-    round.answer,
-    question.answer,
-  ]);
-  return { correct: true };
+  if (!outcome) return { error: "존재하지 않는 방입니다." };
+  return outcome.result;
 }
 
-export function sendChatMessage(
+export async function submitItemQuestionAnswer(
   code: string,
   playerId: string,
   text: string,
-): Room | { error: string } {
-  const room = rooms.get(code.toUpperCase());
-  if (!room) return { error: "존재하지 않는 방입니다." };
-  const player = room.players.find((p) => p.id === playerId);
-  if (!player) return { error: "잘못된 요청입니다." };
-  const trimmed = text.trim().slice(0, 200);
-  if (!trimmed) return { error: "메시지를 입력해 주세요." };
+): Promise<{ correct: boolean } | { error: string }> {
+  const outcome = await mutateRoom(code, (room) => {
+    tick(room);
+    const result = applyItemQuestionAnswer(room, playerId, text);
+    return { result, persist: !("error" in result) };
+  });
 
-  const message: ChatMessage = {
-    id: makeId(),
-    playerId,
-    nickname: player.nickname,
-    text: trimmed,
-    createdAt: Date.now(),
-  };
-  room.chatMessages.push(message);
-  if (room.chatMessages.length > CHAT_HISTORY_LIMIT) {
-    room.chatMessages = room.chatMessages.slice(-CHAT_HISTORY_LIMIT);
-  }
-  return room;
+  if (!outcome) return { error: "존재하지 않는 방입니다." };
+  return outcome.result;
 }
 
-export function applyItemUse(
+export async function sendChatMessage(
+  code: string,
+  playerId: string,
+  text: string,
+): Promise<Room | { error: string }> {
+  const outcome = await mutateRoom(code, (room) => {
+    const result = appendChatMessage(room, playerId, text);
+    return { result, persist: !("error" in result) };
+  });
+
+  if (!outcome) return { error: "존재하지 않는 방입니다." };
+  if ("error" in outcome.result) return { error: outcome.result.error };
+  return outcome.room;
+}
+
+export async function applyItemUse(
   code: string,
   playerId: string,
   itemInstanceId: string,
   targetId: string | undefined,
-): Room | { error: string } {
-  const room = rooms.get(code.toUpperCase());
-  if (!room) return { error: "존재하지 않는 방입니다." };
-  tick(room);
-  if (room.phase !== "round_active") return { error: "라운드가 진행 중이 아닙니다." };
+): Promise<Room | { error: string }> {
+  const outcome = await mutateRoom(code, (room) => {
+    tick(room);
+    const result = useItem(room, playerId, itemInstanceId, targetId);
+    return { result, persist: !("error" in result) };
+  });
 
-  const player = room.players.find((p) => p.id === playerId);
-  if (!player) return { error: "잘못된 요청입니다." };
-  const itemIndex = player.items.findIndex((i) => i.id === itemInstanceId);
-  if (itemIndex === -1) return { error: "보유하지 않은 아이템입니다." };
-  const item = player.items[itemIndex];
-  const definition = ITEM_DEFINITIONS[item.type];
-
-  player.items.splice(itemIndex, 1);
-
-  if (definition.kind === "defense") {
-    player.shieldActive = true;
-    player.activeEffects = [];
-    return room;
-  }
-
-  if (!targetId || targetId === playerId) return { error: "공격 대상을 선택해야 합니다." };
-  const target = room.players.find((p) => p.id === targetId);
-  if (!target) return { error: "대상을 찾을 수 없습니다." };
-
-  if (target.shieldActive) return room; // 방어막에 막혀 효과 없음(아이템은 이미 소모됨)
-
-  if (item.type === "steal") {
-    if (target.items.length > 0) {
-      const stolenIndex = Math.floor(Math.random() * target.items.length);
-      const [stolen] = target.items.splice(stolenIndex, 1);
-      player.items.push({ id: makeId(), type: stolen.type });
-    }
-    return room; // 훔치기는 지속 효과가 아니라 즉시 발동하는 아이템이다.
-  }
-
-  const effect: ActiveEffect = {
-    id: makeId(),
-    itemType: item.type as Exclude<ItemType, "shield" | "steal">,
-    fromPlayerId: playerId,
-    appliedAt: Date.now(),
-  };
-  target.activeEffects.push(effect);
-
-  if (item.type === "hide_syllable") {
-    const round = currentRound(room);
-    if (round) {
-      const alreadyHidden = new Set([
-        ...round.maskedIndexes,
-        ...(round.extraHiddenIndexes[target.id] ?? []),
-      ]);
-      const candidates = Array.from(round.answer)
-        .map((_char, index) => index)
-        .filter((index) => !alreadyHidden.has(index));
-      if (candidates.length > 0) {
-        const pick = candidates[Math.floor(Math.random() * candidates.length)];
-        round.extraHiddenIndexes[target.id] = [...(round.extraHiddenIndexes[target.id] ?? []), pick];
-      }
-    }
-  }
-
-  return room;
+  if (!outcome) return { error: "존재하지 않는 방입니다." };
+  if ("error" in outcome.result) return { error: outcome.result.error };
+  return outcome.room;
 }
 
-export function serializeForPlayer(room: Room, requestingPlayerId: string): ClientRoomView {
-  const round = currentRound(room);
-  const showAnswer = room.phase === "round_result" || room.phase === "finished";
-
-  let questionView = "";
-  if (round) {
-    const extraHidden = round.extraHiddenIndexes[requestingPlayerId] ?? [];
-    const hiddenSet = new Set([...round.maskedIndexes, ...extraHidden]);
-    questionView = Array.from(round.answer)
-      .map((char, index) => (hiddenSet.has(index) ? getChosung(char) : char))
-      .join("");
+/** 방을 읽고 요청자 시점 뷰까지 한 번에 만든다. 폴링 응답에 쓴다. */
+export async function getRoomView(
+  code: string,
+  playerId: string,
+): Promise<
+  | { view: ReturnType<typeof serializeForPlayer> }
+  | { error: string; status: 403 | 404 }
+> {
+  const room = await getRoom(code);
+  if (!room) return { error: "존재하지 않는 방입니다.", status: 404 };
+  if (!room.players.some((p) => p.id === playerId)) {
+    return { error: "이 방의 참가자가 아닙니다.", status: 403 };
   }
-
-  return {
-    code: room.code,
-    phase: room.phase,
-    hostId: room.hostId,
-    category: room.category,
-    difficulty: room.difficulty,
-    totalRounds: TOTAL_ROUNDS,
-    players: room.players.map((p) => ({
-      id: p.id,
-      nickname: p.nickname,
-      isHost: p.isHost,
-      roundWins: p.roundWins,
-      correctRounds: p.correctRounds,
-      averageAnswerMs: p.correctRounds > 0 ? p.totalAnswerMs / p.correctRounds : null,
-      itemCount: p.items.length,
-      activeEffectTypes: p.activeEffects.map((e) => e.itemType),
-      isSelf: p.id === requestingPlayerId,
-      ...(p.id === requestingPlayerId
-        ? {
-            items: p.items.map((i) => ({ id: i.id, ...ITEM_DEFINITIONS[i.type] })),
-            shieldActive: p.shieldActive,
-            myActiveEffects: p.activeEffects.map((e) => ({ id: e.id, type: e.itemType })),
-          }
-        : {}),
-    })),
-    round: round
-      ? {
-          index: round.index,
-          category: round.category,
-          difficulty: round.difficulty,
-          durationMs: round.durationMs,
-          startedAt: round.startedAt,
-          question: questionView,
-          answer: showAnswer ? round.answer : null,
-          winnerId: round.winnerId,
-          winnerAnswerMs: round.winnerAnswerMs,
-          myItemQuestion: round.itemQuestions[requestingPlayerId]?.maskedQuestion ?? null,
-        }
-      : null,
-    ranking: room.phase === "finished" ? computeRanking(room.players) : null,
-    chatMessages: room.chatMessages.slice(-50),
-    serverTime: Date.now(),
-  };
+  return { view: serializeForPlayer(room, playerId) };
 }

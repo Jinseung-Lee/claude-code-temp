@@ -8,6 +8,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "닉네임을 입력해 주세요." }, { status: 400 });
   }
 
-  const { room, player } = createRoom(nickname);
+  const { room, player } = await createRoom(nickname);
   return NextResponse.json({ code: room.code, playerId: player.id });
 }
