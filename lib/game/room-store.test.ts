@@ -3,6 +3,7 @@ import {
   createRoom,
   getRoom,
   joinRoom,
+  listRooms,
   sendChatMessage,
   serializeForPlayer,
   startGame,
@@ -316,5 +317,77 @@ describe("serializeForPlayer", () => {
     await submitAnswer(code, host.id, answer);
     const resolved = serializeForPlayer((await getRoom(code))!, host.id);
     expect(resolved.round?.answer).toBe(answer);
+  });
+});
+
+describe("listRooms", () => {
+  it("만들어진 방을 목록에 보여준다", async () => {
+    const { room } = await createRoom("호스트");
+    const rooms = await listRooms();
+    expect(rooms).toHaveLength(1);
+    expect(rooms[0]).toMatchObject({
+      code: room.code,
+      hostNickname: "호스트",
+      phase: "lobby",
+      playerCount: 1,
+      joinable: true,
+    });
+  });
+
+  it("진행 중인 방도 보여주지만 들어갈 수 없다고 표시한다", async () => {
+    const { code } = await setup(2);
+    const rooms = await listRooms();
+    const found = rooms.find((r) => r.code === code)!;
+    expect(found.phase).toBe("round_active");
+    expect(found.joinable).toBe(false);
+  });
+
+  it("인원이 가득 찬 로비는 들어갈 수 없다고 표시한다", async () => {
+    const { room } = await createRoom("호스트");
+    for (let i = 1; i <= 3; i += 1) {
+      const joined = await joinRoom(room.code, `guest${i}`);
+      if ("error" in joined) throw new Error(joined.error);
+    }
+    const found = (await listRooms()).find((r) => r.code === room.code)!;
+    expect(found.playerCount).toBe(4);
+    expect(found.joinable).toBe(false);
+  });
+
+  it("끝난 방은 목록에서 제외한다", async () => {
+    const { code, host } = await setup(2);
+    // 10라운드를 모두 소진해 finished로 만든다.
+    for (let i = 0; i < 10; i += 1) {
+      const live = await getRoom(code);
+      if (live?.phase !== "round_active") break;
+      await submitAnswer(code, host.id, live.rounds[live.currentRoundIndex].answer);
+      vi.setSystemTime(Date.now() + ROUND_RESULT_MS + 1);
+      await getRoom(code);
+    }
+    expect((await getRoom(code))!.phase).toBe("finished");
+    expect((await listRooms()).some((r) => r.code === code)).toBe(false);
+  });
+
+  it("들어갈 수 있는 방을 앞에 둔다", async () => {
+    // 먼저 대기 방을 만들고, 그 뒤에 진행 중인 방을 만든다. 최신순만
+    // 따르면 진행 중인 방이 앞에 오므로 joinable 정렬이 실제로 검증된다.
+    const open = await createRoom("먼저만든대기방");
+    vi.setSystemTime(Date.now() + 1000);
+    const started = await setup(2);
+
+    const rooms = await listRooms();
+    expect(rooms.map((r) => r.code)).toEqual([open.room.code, started.code]);
+    expect(rooms[0].joinable).toBe(true);
+    expect(rooms[1].joinable).toBe(false);
+  });
+
+  it("정답이나 진행 정보를 목록에 담지 않는다", async () => {
+    const { code } = await setup(2);
+    const live = await getRoom(code);
+    const answer = live!.rounds[0].answer;
+
+    const serialized = JSON.stringify(await listRooms());
+    expect(serialized).not.toContain(answer);
+    expect(serialized).not.toContain("itemQuestions");
+    expect(serialized).not.toContain("rounds");
   });
 });

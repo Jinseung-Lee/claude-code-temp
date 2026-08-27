@@ -18,9 +18,8 @@ import { getStoredPlayerId, storePlayerId } from "@/lib/game/client-storage";
 import { CATEGORIES, type Category } from "@/lib/game/questions";
 import { rankByScore } from "@/lib/game/ranking";
 import { generateRandomNickname } from "@/lib/game/random-nickname";
-import type { ClientRoomView, Difficulty, ItemType } from "@/lib/game/types";
+import { DIFFICULTY_LABEL, type ClientRoomView, type Difficulty, type ItemType } from "@/lib/game/types";
 
-const DIFFICULTY_LABEL: Record<Difficulty, string> = { easy: "하", medium: "중", hard: "상" };
 // clear_input은 한 번 발동하고 끝나는 즉시형 효과라 뱃지로 계속 보여주지 않는다.
 const EFFECT_LABEL: Record<string, string> = {
   delay: "3초 지연",

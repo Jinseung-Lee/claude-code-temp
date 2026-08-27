@@ -55,16 +55,16 @@ export default function Home() {
               <Badge variant="secondary">함께 플레이</Badge>
             </div>
             <CardTitle className="mt-2">멀티모드</CardTitle>
-            <CardDescription>방을 만들어 지인에게 URL을 공유하세요</CardDescription>
+            <CardDescription>방을 만들거나 열려 있는 방에 들어가세요</CardDescription>
           </CardHeader>
           <CardFooter className="mt-auto">
             <Button
-              render={<Link href="/rooms/new" />}
+              render={<Link href="/rooms" />}
               nativeButton={false}
               className="w-full"
               variant="secondary"
             >
-              방 만들기
+              방 목록 보기
               <ArrowRightIcon data-icon="inline-end" />
             </Button>
           </CardFooter>

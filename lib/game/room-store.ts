@@ -7,11 +7,12 @@ import {
   generateRoomCode,
   makeRoom,
   serializeForPlayer,
+  summarizeRoom,
   tick,
   useItem,
 } from "./room-logic";
-import { insertRoom, mutateRoom } from "./room-repository";
-import type { Difficulty, Player, Room } from "./types";
+import { insertRoom, listRecentRooms, mutateRoom } from "./room-repository";
+import type { Difficulty, Player, Room, RoomSummary } from "./types";
 
 export { serializeForPlayer } from "./room-logic";
 
@@ -178,4 +179,32 @@ export async function getRoomView(
     return { error: "이 방의 참가자가 아닙니다.", status: 403 };
   }
   return { view: serializeForPlayer(room, playerId) };
+}
+
+/** 목록에 보여줄 방 개수 상한. 화면에 담기는 만큼만 읽는다. */
+const ROOM_LIST_LIMIT = 30;
+
+/** 이 시간이 지난 방은 목록에서 감춘다. 방치된 방으로 본다. */
+const ROOM_LIST_MAX_AGE_MS = 3 * 60 * 60 * 1000;
+
+/**
+ * 참가할 방을 고를 수 있도록 최근 방 목록을 돌려준다. 끝난 방과 오래
+ * 방치된 방은 제외하고, 들어갈 수 있는 방을 앞에 둔다.
+ *
+ * tick을 돌리지 않으므로 phase는 마지막으로 저장된 값이다. 목록에서는
+ * 대략적인 상태만 보여주면 되고, 실제 입장 가능 여부는 join 시점에
+ * 서버가 다시 판정한다.
+ */
+export async function listRooms(): Promise<RoomSummary[]> {
+  const rooms = await listRecentRooms(ROOM_LIST_LIMIT);
+  const now = Date.now();
+
+  return rooms
+    .filter((room) => room.phase !== "finished")
+    .filter((room) => now - room.createdAt < ROOM_LIST_MAX_AGE_MS)
+    .map(summarizeRoom)
+    .sort((a, b) => {
+      if (a.joinable !== b.joinable) return a.joinable ? -1 : 1;
+      return b.createdAt - a.createdAt;
+    });
 }

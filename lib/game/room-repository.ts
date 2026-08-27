@@ -36,6 +36,8 @@ export interface RoomBackend {
   insert(room: Room): Promise<boolean>;
   /** version이 기대값과 같을 때만 저장한다. 저장했으면 true. */
   saveIfUnchanged(room: Room, expectedVersion: number): Promise<boolean>;
+  /** 최근에 갱신된 방을 최신순으로 최대 limit개 돌려준다. */
+  listRecent(limit: number): Promise<Room[]>;
 }
 
 interface RoomRow {
@@ -112,6 +114,17 @@ const supabaseBackend: RoomBackend = {
     if (error) throw new Error(`방 저장에 실패했습니다: ${error.message}`);
     return (data?.length ?? 0) > 0;
   },
+
+  async listRecent(limit) {
+    const { data, error } = await getClient()
+      .from(ROOMS_TABLE)
+      .select("state")
+      .order("updated_at", { ascending: false })
+      .limit(limit);
+
+    if (error) throw new Error(`방 목록 조회에 실패했습니다: ${error.message}`);
+    return (data ?? []).map((row) => (row as { state: Room }).state);
+  },
 };
 
 /**
@@ -138,6 +151,13 @@ export function createInMemoryRoomBackend(): RoomBackend {
       if (!row || row.version !== expectedVersion) return false;
       rows.set(room.code, { state: clone(room), version: expectedVersion + 1 });
       return true;
+    },
+    async listRecent(limit) {
+      // updated_at 컬럼이 없으므로 마지막에 저장된 순서를 최신으로 본다.
+      return [...rows.values()]
+        .map((row) => clone(row.state))
+        .reverse()
+        .slice(0, limit);
     },
   };
 }
@@ -198,6 +218,10 @@ export async function loadRoom(code: string): Promise<LoadedRoom | null> {
 /** 코드가 이미 쓰이고 있으면 false를 돌려준다. 예외를 던지지 않는다. */
 export async function insertRoom(room: Room): Promise<boolean> {
   return resolveBackend().insert(room);
+}
+
+export async function listRecentRooms(limit: number): Promise<Room[]> {
+  return resolveBackend().listRecent(limit);
 }
 
 /**

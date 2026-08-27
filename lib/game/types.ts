@@ -78,6 +78,12 @@ export interface ChatMessage {
   createdAt: number;
 }
 
+export const DIFFICULTY_LABEL: Record<Difficulty, string> = {
+  easy: "하",
+  medium: "중",
+  hard: "상",
+};
+
 export const MAX_PLAYERS = 4;
 export const TOTAL_ROUNDS = 10;
 export const ROUND_DURATION_MS = 15_000;
@@ -147,6 +153,20 @@ export interface ClientPlayerView {
   items?: ClientItemView[];
   shieldActive?: boolean;
   myActiveEffects?: ClientEffectView[];
+}
+
+/** 방 목록 한 줄. 정답 같은 진행 정보는 담지 않는다. */
+export interface RoomSummary {
+  code: string;
+  hostNickname: string;
+  phase: RoomPhase;
+  playerCount: number;
+  maxPlayers: number;
+  category: string | null;
+  difficulty: Difficulty | null;
+  /** 새 참가자를 받을 수 있는지. 로비이고 자리가 남은 경우에만 true. */
+  joinable: boolean;
+  createdAt: number;
 }
 
 export interface ClientRoomView {

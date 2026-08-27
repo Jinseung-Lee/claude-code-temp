@@ -1,5 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createRoom } from "@/lib/game/room-store";
+import { createRoom, listRooms } from "@/lib/game/room-store";
+
+// 방 목록은 매 요청마다 DB에서 새로 읽어야 한다. 프리렌더되면 빌드 시점의
+// 빈 목록이 그대로 굳어버린다.
+export const dynamic = "force-dynamic";
+
+export async function GET() {
+  const rooms = await listRooms();
+  return NextResponse.json({ rooms });
+}
 
 export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));

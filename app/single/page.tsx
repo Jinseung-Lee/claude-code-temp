@@ -13,9 +13,8 @@ import { getRememberedNickname, rememberNickname } from "@/lib/game/client-stora
 import type { LeaderboardEntry } from "@/lib/game/leaderboard";
 import { CATEGORIES, QUESTION_BANK, type Category } from "@/lib/game/questions";
 import { generateRandomNickname } from "@/lib/game/random-nickname";
-import { SINGLE_MODE_DURATION_MS, type Difficulty } from "@/lib/game/types";
+import { DIFFICULTY_LABEL, SINGLE_MODE_DURATION_MS, type Difficulty } from "@/lib/game/types";
 
-const DIFFICULTY_LABEL: Record<Difficulty, string> = { easy: "하", medium: "중", hard: "상" };
 
 const TICK_MS = 150;
 const FALL_MIN_MS = 9_000;

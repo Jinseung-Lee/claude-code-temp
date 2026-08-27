@@ -17,6 +17,7 @@ import {
   type ItemType,
   type Player,
   type Room,
+  type RoomSummary,
   type RoundState,
 } from "./types";
 
@@ -396,5 +397,21 @@ export function serializeForPlayer(room: Room, requestingPlayerId: string): Clie
     ranking: room.phase === "finished" ? computeRanking(room.players) : null,
     chatMessages: room.chatMessages.slice(-50),
     serverTime: Date.now(),
+  };
+}
+
+/** 방 목록에 쓸 요약을 만든다. 진행 중인 정답은 절대 포함하지 않는다. */
+export function summarizeRoom(room: Room): RoomSummary {
+  const host = room.players.find((p) => p.id === room.hostId);
+  return {
+    code: room.code,
+    hostNickname: host?.nickname ?? "알 수 없음",
+    phase: room.phase,
+    playerCount: room.players.length,
+    maxPlayers: MAX_PLAYERS,
+    category: room.category,
+    difficulty: room.difficulty,
+    joinable: room.phase === "lobby" && room.players.length < MAX_PLAYERS,
+    createdAt: room.createdAt,
   };
 }
