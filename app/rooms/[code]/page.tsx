@@ -4,14 +4,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
-import { ShuffleIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronUpIcon, ShuffleIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { getStoredPlayerId, storePlayerId } from "@/lib/game/client-storage";
 import { CATEGORIES, type Category } from "@/lib/game/questions";
 import { rankByScore } from "@/lib/game/ranking";
@@ -19,11 +21,13 @@ import { generateRandomNickname } from "@/lib/game/random-nickname";
 import type { ClientRoomView, Difficulty, ItemType } from "@/lib/game/types";
 
 const DIFFICULTY_LABEL: Record<Difficulty, string> = { easy: "하", medium: "중", hard: "상" };
+// clear_input은 한 번 발동하고 끝나는 즉시형 효과라 뱃지로 계속 보여주지 않는다.
 const EFFECT_LABEL: Record<string, string> = {
   delay: "3초 지연",
   hide_syllable: "초성 가림",
   reverse_input: "거꾸로 입력",
 };
+const BADGE_VISIBLE_EFFECTS = new Set(Object.keys(EFFECT_LABEL));
 
 const POLL_MS = 700;
 
@@ -46,7 +50,13 @@ export default function RoomPage() {
   const [targetingItemType, setTargetingItemType] = useState<ItemType | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [clockOffset, setClockOffset] = useState(0);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [chatText, setChatText] = useState("");
+  const [itemQuestionAnswer, setItemQuestionAnswer] = useState("");
+  const [itemQuestionWrongFlash, setItemQuestionWrongFlash] = useState(false);
   const answeredRoundRef = useRef<number | null>(null);
+  const clearedEffectIdsRef = useRef<Set<string>>(new Set());
+  const chatScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     // sessionStorage는 클라이언트에서만 읽을 수 있어(서버-클라이언트 하이드레이션 불일치를
@@ -90,6 +100,23 @@ export default function RoomPage() {
       answeredRoundRef.current = null;
     }
   }, [room?.round?.index]);
+
+  useEffect(() => {
+    const me = room?.players.find((p) => p.isSelf);
+    const freshClear = me?.myActiveEffects?.find(
+      (e) => e.type === "clear_input" && !clearedEffectIdsRef.current.has(e.id),
+    );
+    if (freshClear) {
+      clearedEffectIdsRef.current.add(freshClear.id);
+      // 상대가 방금 "입력 지우기" 아이템을 썼다는 서버 신호를 감지해 로컬 입력을 비운다.
+      setAnswer("");
+      toast.warning("상대가 내 입력을 지웠어요!");
+    }
+  }, [room]);
+
+  useEffect(() => {
+    chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight });
+  }, [room?.chatMessages.length]);
 
   async function join() {
     if (!nickname.trim()) {
@@ -162,6 +189,42 @@ export default function RoomPage() {
     const data = await res.json();
     if (!res.ok) toast.error(data.error ?? "아이템을 사용하지 못했습니다.");
     setTargetingItemType(null);
+    fetchRoom();
+  }
+
+  async function submitItemQuestion() {
+    if (!playerId || !itemQuestionAnswer.trim()) return;
+    const res = await fetch(`/api/rooms/${code}/item-question`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ playerId, text: itemQuestionAnswer }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      toast.error(data.error ?? "제출하지 못했습니다.");
+      return;
+    }
+    setItemQuestionAnswer("");
+    if (data.correct) {
+      toast.success("아이템을 획득했어요!");
+    } else {
+      setItemQuestionWrongFlash(true);
+      setTimeout(() => setItemQuestionWrongFlash(false), 400);
+    }
+    fetchRoom();
+  }
+
+  async function sendChat() {
+    if (!playerId || !chatText.trim()) return;
+    const text = chatText;
+    setChatText("");
+    const res = await fetch(`/api/rooms/${code}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ playerId, text }),
+    });
+    const data = await res.json();
+    if (!res.ok) toast.error(data.error ?? "메시지를 보내지 못했습니다.");
     fetchRoom();
   }
 
@@ -273,85 +336,137 @@ export default function RoomPage() {
       </div>
 
       {room.phase === "lobby" && (
-        <Card className="mx-auto w-full max-w-2xl">
-          <CardHeader>
-            <CardTitle>대기실</CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              <Label>공유 URL</Label>
-              <div className="flex gap-2">
-                <Input value={shareUrl} readOnly onFocus={(e) => e.currentTarget.select()} />
+        <div className="grid gap-4 md:grid-cols-[1fr_320px]">
+          <Card>
+            <CardHeader>
+              <CardTitle>참가자 및 설정</CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-4">
+              <div>
                 <Button
                   type="button"
-                  variant="outline"
-                  onClick={() => {
-                    navigator.clipboard.writeText(shareUrl).catch(() => {});
-                    toast.success("URL을 복사했어요.");
-                  }}
+                  variant="ghost"
+                  size="sm"
+                  className="gap-1 px-0 text-muted-foreground hover:bg-transparent"
+                  onClick={() => setShareOpen((v) => !v)}
                 >
-                  복사
+                  URL로 초대하기 (선택)
+                  {shareOpen ? <ChevronUpIcon /> : <ChevronDownIcon />}
                 </Button>
+                {shareOpen && (
+                  <div className="mt-2 flex gap-2">
+                    <Input value={shareUrl} readOnly onFocus={(e) => e.currentTarget.select()} />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => {
+                        navigator.clipboard.writeText(shareUrl).catch(() => {});
+                        toast.success("URL을 복사했어요.");
+                      }}
+                    >
+                      복사
+                    </Button>
+                  </div>
+                )}
               </div>
-            </div>
 
-            <div>
-              <Label>참가자 ({room.players.length}명)</Label>
-              <ul className="mt-2 flex flex-col gap-1">
-                {room.players.map((p) => (
-                  <li key={p.id} className="flex items-center gap-2 text-sm">
-                    <span>{p.nickname}</span>
-                    {p.isHost && <Badge variant="secondary">방장</Badge>}
-                    {p.isSelf && <Badge variant="outline">나</Badge>}
-                  </li>
-                ))}
-              </ul>
-            </div>
+              <div>
+                <Label>참가자 ({room.players.length}명)</Label>
+                <ul className="mt-2 flex flex-col gap-1">
+                  {room.players.map((p) => (
+                    <li key={p.id} className="flex items-center gap-2 text-sm">
+                      <span>{p.nickname}</span>
+                      {p.isHost && <Badge variant="secondary">방장</Badge>}
+                      {p.isSelf && <Badge variant="outline">나</Badge>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
 
-            {isHost ? (
-              <>
-                <Separator />
-                <div className="flex flex-col gap-2">
-                  <Label>카테고리</Label>
-                  <div className="flex flex-wrap gap-2">
-                    {CATEGORIES.map((c) => (
-                      <Button
-                        key={c}
-                        type="button"
-                        size="sm"
-                        variant={category === c ? "default" : "outline"}
-                        onClick={() => setCategory(c)}
-                      >
-                        {c}
-                      </Button>
-                    ))}
+              <Separator />
+
+              {isHost ? (
+                <>
+                  <div className="flex flex-col gap-2">
+                    <Label>카테고리</Label>
+                    <div className="flex flex-wrap gap-2">
+                      {CATEGORIES.map((c) => (
+                        <Button
+                          key={c}
+                          type="button"
+                          size="sm"
+                          variant={category === c ? "default" : "outline"}
+                          onClick={() => setCategory(c)}
+                        >
+                          {c}
+                        </Button>
+                      ))}
+                    </div>
                   </div>
-                </div>
-                <div className="flex flex-col gap-2">
-                  <Label>난이도</Label>
-                  <div className="flex gap-2">
-                    {(["easy", "medium", "hard"] as Difficulty[]).map((d) => (
-                      <Button
-                        key={d}
-                        type="button"
-                        size="sm"
-                        variant={difficulty === d ? "default" : "outline"}
-                        onClick={() => setDifficulty(d)}
-                      >
-                        {DIFFICULTY_LABEL[d]}
-                      </Button>
-                    ))}
+                  <div className="flex flex-col gap-2">
+                    <Label>난이도</Label>
+                    <div className="flex gap-2">
+                      {(["easy", "medium", "hard"] as Difficulty[]).map((d) => (
+                        <Button
+                          key={d}
+                          type="button"
+                          size="sm"
+                          variant={difficulty === d ? "default" : "outline"}
+                          onClick={() => setDifficulty(d)}
+                        >
+                          {DIFFICULTY_LABEL[d]}
+                        </Button>
+                      ))}
+                    </div>
                   </div>
+                  <Button onClick={startGame} disabled={room.players.length < 2}>
+                    {room.players.length < 2 ? "2명 이상 모여야 시작할 수 있어요" : "게임 시작"}
+                  </Button>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">방장이 게임을 시작하기를 기다리는 중...</p>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="flex flex-col">
+            <CardHeader>
+              <CardTitle className="text-base">채팅</CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-1 flex-col gap-2">
+              <ScrollArea className="h-64 rounded-md border p-2" ref={chatScrollRef}>
+                <div className="flex flex-col gap-1">
+                  {room.chatMessages.length === 0 && (
+                    <p className="text-sm text-muted-foreground">아직 메시지가 없어요.</p>
+                  )}
+                  {room.chatMessages.map((m) => (
+                    <p key={m.id} className="text-sm">
+                      <span className="font-medium">{m.nickname}</span>
+                      <span className="text-muted-foreground">: </span>
+                      {m.text}
+                    </p>
+                  ))}
                 </div>
-                <Button onClick={startGame} disabled={room.players.length < 2}>
-                  {room.players.length < 2 ? "2명 이상 모여야 시작할 수 있어요" : "게임 시작"}
-                </Button>
-              </>
-            ) : (
-              <p className="text-sm text-muted-foreground">방장이 게임을 시작하기를 기다리는 중...</p>
-            )}
-          </CardContent>
-        </Card>
+              </ScrollArea>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  sendChat();
+                }}
+                className="flex gap-2"
+              >
+                <Input
+                  value={chatText}
+                  onChange={(e) => setChatText(e.target.value)}
+                  placeholder="메시지를 입력하세요"
+                  maxLength={200}
+                  autoComplete="off"
+                />
+                <Button type="submit">전송</Button>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
       )}
 
       {(room.phase === "round_active" || room.phase === "round_result") && room.round && (
@@ -402,13 +517,15 @@ export default function RoomPage() {
                   </p>
                 ) : (
                   <>
-                    {me && me.activeEffectTypes.length > 0 && (
+                    {me && me.activeEffectTypes.filter((t) => BADGE_VISIBLE_EFFECTS.has(t)).length > 0 && (
                       <div className="flex flex-wrap gap-1">
-                        {me.activeEffectTypes.map((t, i) => (
-                          <Badge key={i} variant="destructive">
-                            {EFFECT_LABEL[t] ?? t}
-                          </Badge>
-                        ))}
+                        {me.activeEffectTypes
+                          .filter((t) => BADGE_VISIBLE_EFFECTS.has(t))
+                          .map((t, i) => (
+                            <Badge key={i} variant="destructive">
+                              {EFFECT_LABEL[t] ?? t}
+                            </Badge>
+                          ))}
                       </div>
                     )}
                     <form
@@ -428,6 +545,35 @@ export default function RoomPage() {
                       />
                       <Button type="submit">제출</Button>
                     </form>
+
+                    {room.round.myItemQuestion && (
+                      <div className="flex flex-col gap-2 rounded-md border border-dashed p-3">
+                        <span className="text-xs text-muted-foreground">
+                          아이템 문제 · 풀면 랜덤 아이템을 얻어요
+                        </span>
+                        <div className="rounded-md bg-muted/30 py-3 text-center text-xl font-bold tracking-widest">
+                          {room.round.myItemQuestion}
+                        </div>
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            submitItemQuestion();
+                          }}
+                          className="flex gap-2"
+                        >
+                          <Input
+                            value={itemQuestionAnswer}
+                            onChange={(e) => setItemQuestionAnswer(e.target.value)}
+                            placeholder="아이템 문제 정답"
+                            className={itemQuestionWrongFlash ? "border-destructive" : undefined}
+                            autoComplete="off"
+                          />
+                          <Button type="submit" size="sm" variant="secondary">
+                            제출
+                          </Button>
+                        </form>
+                      </div>
+                    )}
                   </>
                 )}
               </CardContent>
@@ -440,20 +586,26 @@ export default function RoomPage() {
                 </CardHeader>
                 <CardContent className="flex flex-wrap gap-2">
                   {groupedItems.map((group) => (
-                    <Button
-                      key={group.type}
-                      type="button"
-                      size="sm"
-                      variant={targetingItemType === group.type ? "default" : "outline"}
-                      title={group.description}
-                      onClick={() => {
-                        if (group.kind === "defense") activateItem(group.instanceIds[0]);
-                        else setTargetingItemType(targetingItemType === group.type ? null : group.type);
-                      }}
-                    >
-                      {group.name}
-                      {group.count > 1 ? ` ×${group.count}` : ""}
-                    </Button>
+                    <Tooltip key={group.type}>
+                      <TooltipTrigger
+                        render={
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={targetingItemType === group.type ? "default" : "outline"}
+                            onClick={() => {
+                              if (group.kind === "defense") activateItem(group.instanceIds[0]);
+                              else
+                                setTargetingItemType(targetingItemType === group.type ? null : group.type);
+                            }}
+                          />
+                        }
+                      >
+                        {group.name}
+                        {group.count > 1 ? ` ×${group.count}` : ""}
+                      </TooltipTrigger>
+                      <TooltipContent>{group.description}</TooltipContent>
+                    </Tooltip>
                   ))}
                 </CardContent>
                 {targetingItemType && (
