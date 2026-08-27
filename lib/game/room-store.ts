@@ -10,7 +10,7 @@ import {
   tick,
   useItem,
 } from "./room-logic";
-import { insertRoom, mutateRoom, roomCodeExists } from "./room-repository";
+import { insertRoom, mutateRoom } from "./room-repository";
 import type { Difficulty, Player, Room } from "./types";
 
 export { serializeForPlayer } from "./room-logic";
@@ -25,13 +25,11 @@ export { serializeForPlayer } from "./room-logic";
 const CODE_GENERATION_ATTEMPTS = 10;
 
 export async function createRoom(hostNickname: string): Promise<{ room: Room; player: Player }> {
+  // 코드 중복은 사전 조회가 아니라 insert 실패로 판정한다. 사전 조회와
+  // insert 사이에 다른 인스턴스가 같은 코드를 넣는 경합을 피할 수 있다.
   for (let attempt = 0; attempt < CODE_GENERATION_ATTEMPTS; attempt += 1) {
-    const code = generateRoomCode();
-    if (await roomCodeExists(code)) continue;
-
-    const { room, player } = makeRoom(code, hostNickname);
-    await insertRoom(room);
-    return { room, player };
+    const { room, player } = makeRoom(generateRoomCode(), hostNickname);
+    if (await insertRoom(room)) return { room, player };
   }
   throw new Error("방 코드를 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.");
 }

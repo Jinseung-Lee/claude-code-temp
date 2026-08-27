@@ -32,8 +32,8 @@ export interface LoadedRoom {
  */
 export interface RoomBackend {
   load(code: string): Promise<LoadedRoom | null>;
-  insert(room: Room): Promise<void>;
-  exists(code: string): Promise<boolean>;
+  /** 같은 코드가 이미 있으면 false. 새로 넣었으면 true. */
+  insert(room: Room): Promise<boolean>;
   /** version이 기대값과 같을 때만 저장한다. 저장했으면 true. */
   saveIfUnchanged(room: Room, expectedVersion: number): Promise<boolean>;
 }
@@ -44,6 +44,13 @@ interface RoomRow {
   version: number;
 }
 
+/**
+ * 이 클라이언트는 모듈 전역에 캐싱해도 안전하다. `lib/server.ts`의 쿠키 기반
+ * 클라이언트는 요청별 세션을 담기 때문에 전역 보관이 금지되지만, 여기는
+ * secret key만 쓰고 세션을 저장하지 않으므로(persistSession: false) 요청
+ * 사이에 섞일 상태가 없다. 서버리스 환경에서 인스턴스가 재사용될 때
+ * 연결 설정 비용을 아낀다.
+ */
 let cachedClient: SupabaseClient | null = null;
 
 function getClient(): SupabaseClient {
@@ -81,18 +88,13 @@ const supabaseBackend: RoomBackend = {
       .from(ROOMS_TABLE)
       .insert({ code: room.code, state: room, version: 1 });
 
-    if (error) throw new Error(`방 생성에 실패했습니다: ${error.message}`);
-  },
-
-  async exists(code) {
-    const { data, error } = await getClient()
-      .from(ROOMS_TABLE)
-      .select("code")
-      .eq("code", code.toUpperCase())
-      .maybeSingle<{ code: string }>();
-
-    if (error) throw new Error(`방 코드 확인에 실패했습니다: ${error.message}`);
-    return data !== null;
+    // 23505 = unique_violation. 다른 인스턴스가 같은 코드를 먼저 넣은
+    // 경우이므로 예외가 아니라 "코드를 다시 뽑아라"는 신호로 다룬다.
+    if (error) {
+      if (error.code === "23505") return false;
+      throw new Error(`방 생성에 실패했습니다: ${error.message}`);
+    }
+    return true;
   },
 
   async saveIfUnchanged(room, expectedVersion) {
@@ -127,10 +129,9 @@ export function createInMemoryRoomBackend(): RoomBackend {
       return { room: clone(row.state), version: row.version };
     },
     async insert(room) {
+      if (rows.has(room.code)) return false;
       rows.set(room.code, { state: clone(room), version: 1 });
-    },
-    async exists(code) {
-      return rows.has(code.toUpperCase());
+      return true;
     },
     async saveIfUnchanged(room, expectedVersion) {
       const row = rows.get(room.code);
@@ -194,13 +195,9 @@ export async function loadRoom(code: string): Promise<LoadedRoom | null> {
   return resolveBackend().load(code);
 }
 
-export async function insertRoom(room: Room): Promise<void> {
+/** 코드가 이미 쓰이고 있으면 false를 돌려준다. 예외를 던지지 않는다. */
+export async function insertRoom(room: Room): Promise<boolean> {
   return resolveBackend().insert(room);
-}
-
-/** 코드 중복 여부만 확인한다. 방 코드를 새로 뽑을 때 충돌을 피하는 데 쓴다. */
-export async function roomCodeExists(code: string): Promise<boolean> {
-  return resolveBackend().exists(code);
 }
 
 /**
