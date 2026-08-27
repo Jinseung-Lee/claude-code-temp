@@ -126,10 +126,11 @@ export default function RoomPage() {
     setJoining(true);
     setJoinError(null);
     try {
+      // 저장된 ID가 남아 있으면 새 참가자가 아니라 재입장으로 처리된다.
       const res = await fetch(`/api/rooms/${code}/join`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ nickname }),
+        body: JSON.stringify({ nickname, existingPlayerId: getStoredPlayerId(code) ?? undefined }),
       });
       const data = await res.json();
       if (!res.ok) {

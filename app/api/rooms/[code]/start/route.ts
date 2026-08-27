@@ -24,7 +24,7 @@ export async function POST(
     return NextResponse.json({ error: "잘못된 난이도입니다." }, { status: 400 });
   }
 
-  const result = startGame(code, actorId, category!, difficulty as Difficulty);
+  const result = await startGame(code, actorId, category!, difficulty as Difficulty);
   if ("error" in result) {
     return NextResponse.json({ error: result.error }, { status: 400 });
   }

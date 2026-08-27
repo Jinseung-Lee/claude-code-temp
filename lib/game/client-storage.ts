@@ -1,13 +1,18 @@
 const KEY_PREFIX = "chosung-player:";
 
+/**
+ * 참가자 식별자는 localStorage에 둔다. sessionStorage에 두면 탭을 닫거나
+ * 모바일 브라우저가 탭을 정리하는 순간 ID를 잃고, 진행 중인 방에는 다시
+ * 들어갈 수 없게 된다.
+ */
 export function getStoredPlayerId(code: string): string | null {
   if (typeof window === "undefined") return null;
-  return window.sessionStorage.getItem(KEY_PREFIX + code.toUpperCase());
+  return window.localStorage.getItem(KEY_PREFIX + code.toUpperCase());
 }
 
 export function storePlayerId(code: string, playerId: string): void {
   if (typeof window === "undefined") return;
-  window.sessionStorage.setItem(KEY_PREFIX + code.toUpperCase(), playerId);
+  window.localStorage.setItem(KEY_PREFIX + code.toUpperCase(), playerId);
 }
 
 const NICKNAME_KEY = "chosung-nickname";
