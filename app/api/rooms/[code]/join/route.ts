@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { joinRoom } from "@/lib/game/room-store";
+import { withRoomConflictHandling } from "../../_lib/conflict";
 
 export async function POST(
   request: NextRequest,
@@ -16,9 +17,11 @@ export async function POST(
     return NextResponse.json({ error: "닉네임을 입력해 주세요." }, { status: 400 });
   }
 
-  const result = await joinRoom(code, nickname, existingPlayerId);
-  if ("error" in result) {
-    return NextResponse.json({ error: result.error }, { status: 400 });
-  }
-  return NextResponse.json({ playerId: result.player.id });
+  return withRoomConflictHandling(async () => {
+    const result = await joinRoom(code, nickname, existingPlayerId);
+    if ("error" in result) {
+      return NextResponse.json({ error: result.error }, { status: 400 });
+    }
+    return NextResponse.json({ playerId: result.player.id });
+  });
 }

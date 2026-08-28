@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { submitItemQuestionAnswer } from "@/lib/game/room-store";
+import { withRoomConflictHandling } from "../../_lib/conflict";
 
 export async function POST(
   request: NextRequest,
@@ -12,9 +13,11 @@ export async function POST(
     return NextResponse.json({ error: "잘못된 요청입니다." }, { status: 400 });
   }
 
-  const result = await submitItemQuestionAnswer(code, playerId, text);
-  if ("error" in result) {
-    return NextResponse.json({ error: result.error }, { status: 400 });
-  }
-  return NextResponse.json(result);
+  return withRoomConflictHandling(async () => {
+    const result = await submitItemQuestionAnswer(code, playerId, text);
+    if ("error" in result) {
+      return NextResponse.json({ error: result.error }, { status: 400 });
+    }
+    return NextResponse.json(result);
+  });
 }

@@ -11,8 +11,28 @@ import type { Room } from "./types";
 
 export const ROOMS_TABLE = "game_rooms";
 
-/** 낙관적 락 충돌 시 재시도 횟수. 4인 방의 동시 요청 정도는 충분히 흡수한다. */
-const MAX_WRITE_ATTEMPTS = 5;
+/**
+ * 낙관적 락 충돌 시 재시도 횟수. 4인이 폴링하며 채팅·정답·아이템을 동시에
+ * 밀어넣는 상황에서는 한 요청이 여러 번 밀릴 수 있으므로 넉넉히 잡는다.
+ */
+const MAX_WRITE_ATTEMPTS = 12;
+
+/**
+ * 재시도 사이의 대기. 즉시 다시 시도하면 충돌한 요청들이 같은 리듬으로
+ * 계속 부딪히므로, 시도 횟수에 따라 늘어나는 무작위 지연을 끼워 서로 흩어지게 한다.
+ */
+const RETRY_BASE_DELAY_MS = 8;
+const RETRY_MAX_DELAY_MS = 120;
+
+function retryDelayMs(attempt: number): number {
+  const ceiling = Math.min(RETRY_BASE_DELAY_MS * 2 ** attempt, RETRY_MAX_DELAY_MS);
+  // 지터가 없으면 동시에 밀린 요청들이 같은 시각에 함께 깨어나 다시 충돌한다.
+  return Math.random() * ceiling;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export class RoomVersionConflictError extends Error {
   constructor() {
@@ -259,6 +279,9 @@ export async function mutateRoom<T>(
 
     const saved = await active.saveIfUnchanged(loaded.room, loaded.version);
     if (saved) return { room: loaded.room, result };
+
+    // 다른 요청이 먼저 저장했다. 잠시 물러난 뒤 새 상태로 다시 시도한다.
+    await sleep(retryDelayMs(attempt));
   }
 
   throw new RoomVersionConflictError();

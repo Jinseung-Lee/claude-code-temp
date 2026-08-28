@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { startGame } from "@/lib/game/room-store";
 import { CATEGORIES } from "@/lib/game/questions";
 import type { Difficulty } from "@/lib/game/types";
+import { withRoomConflictHandling } from "../../_lib/conflict";
 
 const DIFFICULTIES: Difficulty[] = ["easy", "medium", "hard"];
 
@@ -24,9 +25,11 @@ export async function POST(
     return NextResponse.json({ error: "잘못된 난이도입니다." }, { status: 400 });
   }
 
-  const result = await startGame(code, actorId, category!, difficulty as Difficulty);
-  if ("error" in result) {
-    return NextResponse.json({ error: result.error }, { status: 400 });
-  }
-  return NextResponse.json({ ok: true });
+  return withRoomConflictHandling(async () => {
+    const result = await startGame(code, actorId, category!, difficulty as Difficulty);
+    if ("error" in result) {
+      return NextResponse.json({ error: result.error }, { status: 400 });
+    }
+    return NextResponse.json({ ok: true });
+  });
 }

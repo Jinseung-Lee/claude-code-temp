@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getRoomView } from "@/lib/game/room-store";
+import { withRoomConflictHandling } from "../_lib/conflict";
 
 export async function GET(
   request: NextRequest,
@@ -8,10 +9,12 @@ export async function GET(
   const { code } = await params;
   const playerId = request.nextUrl.searchParams.get("playerId") ?? "";
 
-  const result = await getRoomView(code, playerId);
-  if ("error" in result) {
-    return NextResponse.json({ error: result.error }, { status: result.status });
-  }
+  return withRoomConflictHandling(async () => {
+    const result = await getRoomView(code, playerId);
+    if ("error" in result) {
+      return NextResponse.json({ error: result.error }, { status: result.status });
+    }
 
-  return NextResponse.json(result.view);
+    return NextResponse.json(result.view);
+  });
 }
