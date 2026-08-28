@@ -22,7 +22,7 @@ import {
 } from "./room-repository";
 import {
   DELAY_ITEM_MS,
-  DISBANDED_RETENTION_MS,
+  ENDED_ROOM_RETENTION_MS,
   LOBBY_IDLE_TIMEOUT_MS,
   ROUND_DURATION_MS,
   ROUND_RESULT_MS,
@@ -483,13 +483,12 @@ describe("leaveRoom", () => {
   it("게임 중 1명만 남으면 즉시 종료하고 남은 1명이 승리한다", async () => {
     const { code, host, others } = await setup(2);
 
-    // 이 이탈로 방이 종료·삭제되므로, leaveRoom이 돌려주는 마지막 상태로 확인한다.
     const left = await leaveRoom(code, others[0].id);
     if ("error" in left) throw new Error(left.error);
-    expect(left.deleted).toBe(true);
-    expect(await loadRoom(code)).toBeNull();
+    // 남은 사람이 결과를 볼 수 있어야 하므로 방은 아직 지워지지 않는다.
+    expect(left.deleted).toBe(false);
 
-    const room = left.room!;
+    const room = (await getRoom(code))!;
     expect(room.phase).toBe("finished");
     expect(room.endReason).toBe("last_player_standing");
 
@@ -628,10 +627,15 @@ describe("종료된 방 삭제", () => {
     }
   }
 
-  it("10라운드가 끝나면 방을 저장소에서 지운다", async () => {
+  it("10라운드가 끝난 방은 결과를 볼 시간이 지난 뒤에 지워진다", async () => {
     const { code } = await setup(2);
 
     await playToFinish(code);
+    // 끝난 직후에는 최종 순위를 볼 수 있어야 하므로 남아 있다.
+    expect(await loadRoom(code)).not.toBeNull();
+
+    vi.setSystemTime(Date.now() + ENDED_ROOM_RETENTION_MS + 1);
+    await getRoom(code);
 
     expect(await loadRoom(code)).toBeNull();
   });
@@ -650,18 +654,31 @@ describe("종료된 방 삭제", () => {
     vi.setSystemTime(Date.now() + ROUND_RESULT_MS + 1);
     const finished = (await getRoom(code))!;
 
-    // 삭제와 같은 조회에서 순위를 돌려주므로 참가자는 결과를 볼 수 있다.
+    // 끝난 직후 폴링에서 순위를 볼 수 있어야 한다.
     expect(finished.phase).toBe("finished");
     expect(serializeForPlayer(finished, host.id).ranking).not.toBeNull();
-    expect(await loadRoom(code)).toBeNull();
+    expect(await loadRoom(code)).not.toBeNull();
   });
 
-  it("게임 중 1명만 남아 종료되면 방을 지운다", async () => {
-    const { code, others } = await setup(2);
+  it("게임 중 1명만 남아 종료되면 남은 사람이 결과를 볼 수 있게 남긴다", async () => {
+    const { code, host, others } = await setup(2);
 
     const result = await leaveRoom(code, others[0].id);
 
-    expect(result).toMatchObject({ ok: true, deleted: true });
+    expect(result).toMatchObject({ ok: true, deleted: false });
+    // 남은 사람의 폴링이 404가 아니라 1인 승리 결과를 받아야 한다.
+    const view = await getRoomView(code, host.id);
+    expect("view" in view && view.view.phase).toBe("finished");
+    expect("view" in view && view.view.ranking?.[0]?.id).toBe(host.id);
+  });
+
+  it("1인 승리 종료도 보관 시간이 지나면 지워진다", async () => {
+    const { code, others } = await setup(2);
+    await leaveRoom(code, others[0].id);
+
+    vi.setSystemTime(Date.now() + ENDED_ROOM_RETENTION_MS + 1);
+    await getRoom(code);
+
     expect(await loadRoom(code)).toBeNull();
   });
 
@@ -692,7 +709,7 @@ describe("종료된 방 삭제", () => {
     const { room, player: host } = await createRoom("혼자");
     await leaveRoom(room.code, host.id);
 
-    vi.setSystemTime(Date.now() + DISBANDED_RETENTION_MS + 1);
+    vi.setSystemTime(Date.now() + ENDED_ROOM_RETENTION_MS + 1);
     await getRoom(room.code);
 
     expect(await loadRoom(room.code)).toBeNull();
@@ -709,7 +726,7 @@ describe("종료된 방 삭제", () => {
     // 해체 직후에는 사유를 알려줄 수 있어야 하므로 아직 남아 있다.
     expect(await loadRoom(room.code)).not.toBeNull();
 
-    vi.setSystemTime(Date.now() + DISBANDED_RETENTION_MS + 1);
+    vi.setSystemTime(Date.now() + ENDED_ROOM_RETENTION_MS + 1);
     await getRoom(room.code);
     expect(await loadRoom(room.code)).toBeNull();
   });
@@ -736,9 +753,12 @@ describe("종료된 방 삭제", () => {
     expect(await loadRoom(room.code)).not.toBeNull();
   });
 
-  it("이미 지워진 방에 나가기를 다시 보내도 오류가 아니다", async () => {
+  it("이미 지워진 방에 나가기를 보내도 오류가 아니다", async () => {
     const { code, others } = await setup(2);
     await leaveRoom(code, others[0].id);
+    vi.setSystemTime(Date.now() + ENDED_ROOM_RETENTION_MS + 1);
+    await getRoom(code); // 보관 시간이 지나 삭제된다
+    expect(await loadRoom(code)).toBeNull();
 
     // 버튼 클릭과 페이지 종료 신호가 겹쳐 두 번 도착하는 상황이다.
     const again = await leaveRoom(code, others[0].id);

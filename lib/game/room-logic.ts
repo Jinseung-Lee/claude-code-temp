@@ -4,7 +4,7 @@ import { pickRandomQuestion } from "./questions";
 import { computeRanking } from "./ranking";
 import {
   CHAT_HISTORY_LIMIT,
-  DISBANDED_RETENTION_MS,
+  ENDED_ROOM_RETENTION_MS,
   DELAY_ITEM_MS,
   LOBBY_IDLE_TIMEOUT_MS,
   MAX_PLAYERS,
@@ -119,6 +119,7 @@ export function tick(room: Room): void {
   if (room.phase === "lobby" && now - room.lastActivityAt >= LOBBY_IDLE_TIMEOUT_MS) {
     room.phase = "disbanded";
     room.endReason = "idle_disbanded";
+    room.lastActivityAt = now;
     return;
   }
 
@@ -129,6 +130,8 @@ export function tick(room: Room): void {
   ) {
     room.phase = "finished";
     room.endReason = "last_player_standing";
+    // 종료 시각을 찍어, 결과를 볼 보관 시간이 이 시점부터 시작되게 한다.
+    room.lastActivityAt = now;
     return;
   }
 
@@ -166,6 +169,7 @@ export function tick(room: Room): void {
     if (round?.resultUntil !== null && round?.resultUntil !== undefined && now >= round.resultUntil) {
       if (room.currentRoundIndex + 1 >= TOTAL_ROUNDS) {
         room.phase = "finished";
+        room.lastActivityAt = now;
       } else {
         const previousAnswers = room.rounds.map((r) => r.answer);
         room.currentRoundIndex += 1;
@@ -268,20 +272,17 @@ export function isRoomOver(room: Room): boolean {
 /**
  * 방을 저장소에서 지워도 되는지 판단한다.
  *
- * `finished`는 곧바로 지운다. 결과 화면에 필요한 상태는 종료를 확정한
- * 응답에 이미 실려 나가므로, 행을 남겨둘 이유가 없다.
+ * 종착 상태가 되자마자 지우면 참가자의 다음 폴링이 404를 받아, 최종 순위
+ * (`finished`)나 해체 사유(`disbanded`)를 볼 기회 없이 화면이 "사라진 방"
+ * 으로 덮인다. 특히 게임 중 상대가 나가 1인 승리로 끝난 경우, 남은 사람은
+ * 자기가 이겼다는 결과를 보지 못한다.
  *
- * `disbanded`는 바로 지우지 않는다. 지우면 "해체되었습니다"(410)와
- * "존재하지 않는 방입니다"(404)를 구분할 수 없어, 대기하던 참가자가
- * 방이 왜 사라졌는지 알 수 없게 된다. 해체 사유를 알려줄 수 있는 동안만
- * 남겨두고 그 뒤에 지운다.
+ * 그래서 종료 시각으로부터 일정 시간이 지난 뒤에 지운다. 결과를 확인할
+ * 시간은 주면서도, 끝난 방이 저장소에 계속 쌓이지는 않게 한다.
  */
 export function isRoomDeletable(room: Room, now: number = Date.now()): boolean {
-  if (room.phase === "finished") return true;
-  if (room.phase === "disbanded") {
-    return now - room.lastActivityAt >= DISBANDED_RETENTION_MS;
-  }
-  return false;
+  if (!isRoomOver(room)) return false;
+  return now - room.lastActivityAt >= ENDED_ROOM_RETENTION_MS;
 }
 
 export function beginGame(

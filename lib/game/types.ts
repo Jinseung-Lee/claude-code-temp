@@ -102,10 +102,13 @@ export const CHAT_HISTORY_LIMIT = 100;
 export const LOBBY_IDLE_TIMEOUT_MS = 20_000;
 
 /**
- * 해체된 방을 저장소에 남겨두는 시간. 이 동안은 접근하면 "해체되었습니다"라고
- * 사유를 알려주고, 지난 뒤에는 방을 지워 "존재하지 않는 방"으로 처리한다.
+ * 끝난 방을 저장소에 남겨두는 시간.
+ *
+ * 방이 종료되는 순간 지워버리면 참가자의 다음 폴링이 곧바로 404를 받아,
+ * 최종 순위나 해체 사유를 볼 기회 없이 화면이 "사라진 방"으로 덮인다.
+ * 결과를 확인할 시간을 준 뒤에 지운다.
  */
-export const DISBANDED_RETENTION_MS = 5 * 60_000;
+export const ENDED_ROOM_RETENTION_MS = 5 * 60_000;
 
 export interface Room {
   code: string;
