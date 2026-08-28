@@ -30,6 +30,30 @@ const BADGE_VISIBLE_EFFECTS = new Set(Object.keys(EFFECT_LABEL));
 
 const POLL_MS = 700;
 
+/** 서버가 낙관적 락 충돌로 409를 주면 잠깐 뒤 다시 보낸다. */
+const CONFLICT_RETRY_LIMIT = 3;
+
+async function postWithRetry(url: string, body: unknown) {
+  for (let attempt = 0; attempt <= CONFLICT_RETRY_LIMIT; attempt += 1) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (res.status !== 409 || attempt === CONFLICT_RETRY_LIMIT) return res;
+    // 여러 요청이 동시에 밀렸을 때 같은 시각에 함께 재시도하지 않도록 흩뿌린다.
+    await new Promise((resolve) => setTimeout(resolve, 60 * (attempt + 1) * (0.5 + Math.random())));
+  }
+  throw new Error("unreachable");
+}
+
+/**
+ * 승자가 이미 확정된 뒤 도착한 제출에 서버가 주는 응답. 사용자가 정답을
+ * 맞혔더라도 근소하게 늦으면 여기에 걸리므로, 실패로 취급해 빨간 오류를
+ * 띄우지 않는다.
+ */
+const LATE_SUBMIT_ERRORS = new Set(["라운드가 진행 중이 아닙니다."]);
+
 export default function RoomPage() {
   const params = useParams<{ code: string }>();
   const code = (params.code ?? "").toUpperCase();
@@ -70,6 +94,9 @@ export default function RoomPage() {
     const res = await fetch(`/api/rooms/${code}?playerId=${playerId}`);
     const data = await res.json();
     if (!res.ok) {
+      // 409는 방에 쓰기가 몰려 이번 조회만 밀린 것이다. 다음 폴링에서 곧
+      // 받아오므로 화면을 오류로 덮지 않는다.
+      if (res.status === 409) return;
       setFetchError(data.error ?? "방 정보를 불러오지 못했습니다.");
       return;
     }
@@ -126,10 +153,9 @@ export default function RoomPage() {
     setJoinError(null);
     try {
       // 저장된 ID가 남아 있으면 새 참가자가 아니라 재입장으로 처리된다.
-      const res = await fetch(`/api/rooms/${code}/join`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ nickname, existingPlayerId: getStoredPlayerId(code) ?? undefined }),
+      const res = await postWithRetry(`/api/rooms/${code}/join`, {
+        nickname,
+        existingPlayerId: getStoredPlayerId(code) ?? undefined,
       });
       const data = await res.json();
       if (!res.ok) {
@@ -147,10 +173,10 @@ export default function RoomPage() {
 
   async function startGame() {
     if (!playerId) return;
-    const res = await fetch(`/api/rooms/${code}/start`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ actorId: playerId, category, difficulty }),
+    const res = await postWithRetry(`/api/rooms/${code}/start`, {
+      actorId: playerId,
+      category,
+      difficulty,
     });
     const data = await res.json();
     if (!res.ok) toast.error(data.error ?? "게임을 시작하지 못했습니다.");
@@ -160,13 +186,16 @@ export default function RoomPage() {
   async function submitAnswer() {
     if (!playerId || !answer.trim() || !room?.round) return;
     answeredRoundRef.current = room.round.index;
-    const res = await fetch(`/api/rooms/${code}/answer`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ playerId, text: answer }),
-    });
+    const res = await postWithRetry(`/api/rooms/${code}/answer`, { playerId, text: answer });
     const data = await res.json();
     if (!res.ok) {
+      // 라운드가 막 끝난 뒤 도착한 제출은 사용자 잘못이 아니다. 다음 라운드
+      // 화면이 곧 내려오므로 오류 대신 상태만 정리한다.
+      if (LATE_SUBMIT_ERRORS.has(data.error)) {
+        setAnswer("");
+        fetchRoom();
+        return;
+      }
       toast.error(data.error ?? "제출하지 못했습니다.");
       return;
     }
@@ -181,11 +210,7 @@ export default function RoomPage() {
 
   async function activateItem(itemId: string, targetId?: string) {
     if (!playerId) return;
-    const res = await fetch(`/api/rooms/${code}/item`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ playerId, itemId, targetId }),
-    });
+    const res = await postWithRetry(`/api/rooms/${code}/item`, { playerId, itemId, targetId });
     const data = await res.json();
     if (!res.ok) toast.error(data.error ?? "아이템을 사용하지 못했습니다.");
     setTargetingItemType(null);
@@ -194,10 +219,9 @@ export default function RoomPage() {
 
   async function submitItemQuestion() {
     if (!playerId || !itemQuestionAnswer.trim()) return;
-    const res = await fetch(`/api/rooms/${code}/item-question`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ playerId, text: itemQuestionAnswer }),
+    const res = await postWithRetry(`/api/rooms/${code}/item-question`, {
+      playerId,
+      text: itemQuestionAnswer,
     });
     const data = await res.json();
     if (!res.ok) {
@@ -218,11 +242,7 @@ export default function RoomPage() {
     if (!playerId || !chatText.trim()) return;
     const text = chatText;
     setChatText("");
-    const res = await fetch(`/api/rooms/${code}/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ playerId, text }),
-    });
+    const res = await postWithRetry(`/api/rooms/${code}/chat`, { playerId, text });
     const data = await res.json();
     if (!res.ok) toast.error(data.error ?? "메시지를 보내지 못했습니다.");
     fetchRoom();
