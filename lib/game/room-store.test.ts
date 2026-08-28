@@ -11,7 +11,12 @@ import {
   submitItemQuestionAnswer,
   applyItemUse,
 } from "./room-store";
-import { createInMemoryRoomBackend, mutateRoom, setRoomBackend } from "./room-repository";
+import {
+  createInMemoryRoomBackend,
+  isEphemeralStorageUnsafe,
+  mutateRoom,
+  setRoomBackend,
+} from "./room-repository";
 import {
   DELAY_ITEM_MS,
   ROUND_DURATION_MS,
@@ -79,6 +84,41 @@ describe("Supabase 설정이 없는 환경", () => {
     const reloaded = await getRoom(room.code);
     expect(reloaded?.code).toBe(room.code);
     expect(reloaded?.players[0].id).toBe(player.id);
+
+    vi.unstubAllEnvs();
+  });
+});
+
+describe("서버리스 인메모리 폴백 감지", () => {
+  it("Vercel에서 Supabase 설정이 없으면 위험 상태로 본다", () => {
+    setRoomBackend(null);
+    vi.stubEnv("VERCEL", "1");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "");
+    vi.stubEnv("SUPABASE_SECRET_KEY", "");
+
+    expect(isEphemeralStorageUnsafe()).toBe(true);
+
+    vi.unstubAllEnvs();
+  });
+
+  it("Supabase가 설정돼 있으면 위험 상태가 아니다", () => {
+    setRoomBackend(null);
+    vi.stubEnv("VERCEL", "1");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co");
+    vi.stubEnv("SUPABASE_SECRET_KEY", "secret");
+
+    expect(isEphemeralStorageUnsafe()).toBe(false);
+
+    vi.unstubAllEnvs();
+  });
+
+  it("Vercel이 아닌 환경(로컬 개발)에서는 폴백을 허용한다", () => {
+    setRoomBackend(null);
+    vi.stubEnv("VERCEL", "");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "");
+    vi.stubEnv("SUPABASE_SECRET_KEY", "");
+
+    expect(isEphemeralStorageUnsafe()).toBe(false);
 
     vi.unstubAllEnvs();
   });

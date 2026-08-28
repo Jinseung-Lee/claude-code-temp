@@ -162,6 +162,13 @@ export function createInMemoryRoomBackend(): RoomBackend {
   };
 }
 
+let injectedBackend: RoomBackend | null = null;
+
+/** 테스트에서 백엔드를 직접 끼우기 위한 훅. null이면 자동 선택으로 되돌린다. */
+export function setRoomBackend(next: RoomBackend | null): void {
+  injectedBackend = next;
+}
+
 function isSupabaseConfigured(): boolean {
   return Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SECRET_KEY);
 }
@@ -184,6 +191,20 @@ function getFallbackBackend(): RoomBackend {
 let warnedAboutFallback = false;
 
 /**
+ * 서버리스 환경(Vercel 등)에서는 요청마다 다른 인스턴스로 갈 수 있어
+ * 인메모리 폴백이 성립하지 않는다. 방을 만든 인스턴스가 아닌 곳으로
+ * 다음 요청이 가면 방이 통째로 사라진 것처럼 보인다. 이 경우는 조용히
+ * 넘어가면 안 되므로 원인을 그대로 드러낸다.
+ */
+export function isEphemeralStorageUnsafe(): boolean {
+  return !isSupabaseConfigured() && !injectedBackend && Boolean(process.env.VERCEL);
+}
+
+export const EPHEMERAL_STORAGE_ERROR =
+  "서버에 방 저장소(Supabase)가 설정되지 않아 게임을 진행할 수 없습니다. " +
+  "NEXT_PUBLIC_SUPABASE_URL과 SUPABASE_SECRET_KEY 환경변수를 설정해 주세요.";
+
+/**
  * 실제로 쓸 백엔드를 고른다. Supabase 설정이 있으면 그쪽에 저장해 서버
  * 재시작이나 인스턴스 교체에도 방이 살아남는다. 설정이 없으면 예외를
  * 던지는 대신 인메모리로 떨어뜨려, 환경변수를 채우지 않은 환경에서도
@@ -202,13 +223,6 @@ function resolveBackend(): RoomBackend {
     );
   }
   return getFallbackBackend();
-}
-
-let injectedBackend: RoomBackend | null = null;
-
-/** 테스트에서 백엔드를 직접 끼우기 위한 훅. null이면 자동 선택으로 되돌린다. */
-export function setRoomBackend(next: RoomBackend | null): void {
-  injectedBackend = next;
 }
 
 export async function loadRoom(code: string): Promise<LoadedRoom | null> {
