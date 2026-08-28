@@ -16,6 +16,7 @@ const PHASE_LABEL: Record<RoomPhase, string> = {
   round_active: "게임 중",
   round_result: "게임 중",
   finished: "종료",
+  disbanded: "해체됨",
 };
 
 export default function RoomListPage() {
@@ -102,7 +103,36 @@ export default function RoomListPage() {
                     <span className="font-mono">{room.code}</span>
                   </p>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="flex flex-col gap-3">
+                  {room.players.length > 0 && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-xs text-muted-foreground">
+                        {room.phase === "lobby" ? "참가자" : "참가자 및 순위"}
+                      </span>
+                      <ul className="flex flex-col gap-1">
+                        {room.players.map((p, index) => (
+                          <li
+                            key={`${p.nickname}-${index}`}
+                            className="flex items-center justify-between gap-2 text-sm"
+                          >
+                            <span className="flex items-center gap-1.5">
+                              {p.rank !== null && (
+                                <Badge variant={p.rank === 1 ? "default" : "outline"}>
+                                  {p.rank}위
+                                </Badge>
+                              )}
+                              {p.nickname}
+                              {p.isHost && <Badge variant="secondary">방장</Badge>}
+                            </span>
+                            {p.rank !== null && (
+                              <span className="text-muted-foreground">{p.roundWins}승</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
                   {room.joinable ? (
                     <Button
                       render={<Link href={`/rooms/${room.code}`} />}

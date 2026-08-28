@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
-import { ChevronDownIcon, ChevronUpIcon, ShuffleIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronUpIcon, LogOutIcon, ShuffleIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -14,11 +14,23 @@ import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { getStoredPlayerId, storePlayerId } from "@/lib/game/client-storage";
+import {
+  NICKNAME_MAX_LENGTH,
+  getRememberedNickname,
+  getStoredPlayerId,
+  rememberNickname,
+  storePlayerId,
+} from "@/lib/game/client-storage";
 import { CATEGORIES, type Category } from "@/lib/game/questions";
 import { rankByScore } from "@/lib/game/ranking";
 import { generateRandomNickname } from "@/lib/game/random-nickname";
-import { DIFFICULTY_LABEL, type ClientRoomView, type Difficulty, type ItemType } from "@/lib/game/types";
+import {
+  DIFFICULTY_LABEL,
+  LOBBY_IDLE_TIMEOUT_MS,
+  type ClientRoomView,
+  type Difficulty,
+  type ItemType,
+} from "@/lib/game/types";
 
 // clear_input은 한 번 발동하고 끝나는 즉시형 효과라 뱃지로 계속 보여주지 않는다.
 const EFFECT_LABEL: Record<string, string> = {
@@ -30,8 +42,15 @@ const BADGE_VISIBLE_EFFECTS = new Set(Object.keys(EFFECT_LABEL));
 
 const POLL_MS = 700;
 
+/** 화면 문구에 쓰는 무응답 해체 시간(초). 서버 상수와 같은 값을 보여준다. */
+const IDLE_TIMEOUT_SECONDS = Math.round(LOBBY_IDLE_TIMEOUT_MS / 1000);
+
+/** 남은 시간이 이 아래로 떨어지면 카운트다운을 강조한다. */
+const IDLE_WARNING_MS = 10_000;
+
 export default function RoomPage() {
   const params = useParams<{ code: string }>();
+  const router = useRouter();
   const code = (params.code ?? "").toUpperCase();
 
   const [playerId, setPlayerId] = useState<string | null>(null);
@@ -39,6 +58,7 @@ export default function RoomPage() {
   const [nickname, setNickname] = useState("");
   const [joinError, setJoinError] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
+  const [leaving, setLeaving] = useState(false);
 
   const [room, setRoom] = useState<ClientRoomView | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -56,12 +76,16 @@ export default function RoomPage() {
   const answeredRoundRef = useRef<number | null>(null);
   const clearedEffectIdsRef = useRef<Set<string>>(new Set());
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  // 자동 참여를 한 번만 시도한다. 실패했을 때 무한 재시도로 도는 것을 막는다.
+  const autoJoinedRef = useRef(false);
 
   useEffect(() => {
     // sessionStorage는 클라이언트에서만 읽을 수 있어(서버-클라이언트 하이드레이션 불일치를
     // 피하려고) 마운트 후 한 번 동기화한다.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPlayerId(getStoredPlayerId(code));
+    // 홈에서 만든 닉네임을 그대로 쓴다. 방마다 다시 입력하지 않게 한다.
+    setNickname(getRememberedNickname());
     setHydrated(true);
   }, [code]);
 
@@ -117,31 +141,74 @@ export default function RoomPage() {
     chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight });
   }, [room?.chatMessages.length]);
 
-  async function join() {
-    if (!nickname.trim()) {
-      setJoinError("닉네임을 입력해 주세요.");
-      return;
-    }
-    setJoining(true);
-    setJoinError(null);
-    try {
-      // 저장된 ID가 남아 있으면 새 참가자가 아니라 재입장으로 처리된다.
-      const res = await fetch(`/api/rooms/${code}/join`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ nickname, existingPlayerId: getStoredPlayerId(code) ?? undefined }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setJoinError(data.error ?? "참여하지 못했습니다.");
+  const join = useCallback(
+    async (withNickname: string) => {
+      const trimmed = withNickname.trim();
+      if (!trimmed) {
+        setJoinError("닉네임을 입력해 주세요.");
         return;
       }
-      storePlayerId(code, data.playerId);
-      setPlayerId(data.playerId);
+      setJoining(true);
+      setJoinError(null);
+      try {
+        // 저장된 ID가 남아 있으면 새 참가자가 아니라 재입장으로 처리된다.
+        const res = await fetch(`/api/rooms/${code}/join`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            nickname: trimmed,
+            existingPlayerId: getStoredPlayerId(code) ?? undefined,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setJoinError(data.error ?? "참여하지 못했습니다.");
+          return;
+        }
+        rememberNickname(trimmed);
+        storePlayerId(code, data.playerId);
+        setPlayerId(data.playerId);
+      } catch {
+        setJoinError("네트워크 오류가 발생했습니다.");
+      } finally {
+        setJoining(false);
+      }
+    },
+    [code],
+  );
+
+  useEffect(() => {
+    // 홈에서 닉네임을 이미 만들었으면 다시 입력받지 않고 곧바로 합류한다.
+    if (!hydrated || playerId || joining || joinError || autoJoinedRef.current) return;
+    const stored = getRememberedNickname().trim();
+    if (!stored) return;
+    autoJoinedRef.current = true;
+    // 참여 요청을 다음 틱으로 미뤄, effect가 실행되는 도중에 setState가
+    // 일어나지 않게 한다(react-hooks/set-state-in-effect).
+    const timer = setTimeout(() => join(stored), 0);
+    return () => clearTimeout(timer);
+  }, [hydrated, playerId, joining, joinError, join]);
+
+  /**
+   * 방을 나가 홈으로 돌아간다. 서버에서 참가자를 빼면 남은 인원에 따라
+   * 1인 생존 종료나 방 해체가 함께 처리된다.
+   */
+  async function leaveToHome() {
+    if (leaving) return;
+    setLeaving(true);
+    try {
+      if (playerId) {
+        await fetch(`/api/rooms/${code}`, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ playerId }),
+        });
+      }
     } catch {
-      setJoinError("네트워크 오류가 발생했습니다.");
+      // 나가기 요청이 실패해도 홈으로는 보내준다. 남은 참가자 쪽에서는
+      // 무응답 해체나 다음 tick이 정리한다.
     } finally {
-      setJoining(false);
+      router.push("/");
     }
   }
 
@@ -247,9 +314,9 @@ export default function RoomPage() {
                   id="nickname"
                   value={nickname}
                   onChange={(e) => setNickname(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && join()}
+                  onKeyDown={(e) => e.key === "Enter" && join(nickname)}
                   placeholder="내 닉네임"
-                  maxLength={12}
+                  maxLength={NICKNAME_MAX_LENGTH}
                   autoFocus
                 />
                 <Button
@@ -264,7 +331,7 @@ export default function RoomPage() {
               </div>
             </div>
             {joinError && <p className="text-sm text-destructive">{joinError}</p>}
-            <Button onClick={join} disabled={joining}>
+            <Button onClick={() => join(nickname)} disabled={joining}>
               {joining ? "참여하는 중..." : "참여하기"}
             </Button>
           </CardContent>
@@ -326,13 +393,27 @@ export default function RoomPage() {
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-4 px-6 py-10">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">방 {room.code}</h1>
-        {room.phase !== "finished" && (
-          <Badge variant="outline">
-            라운드 {room.round ? room.round.index + 1 : 0} / {room.totalRounds}
-          </Badge>
-        )}
+        <div className="flex items-center gap-2">
+          {room.phase !== "finished" && (
+            <Badge variant="outline">
+              라운드 {room.round ? room.round.index + 1 : 0} / {room.totalRounds}
+            </Badge>
+          )}
+          {room.phase !== "finished" && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={leaveToHome}
+              disabled={leaving}
+            >
+              <LogOutIcon data-icon="inline-start" />
+              게임 종료
+            </Button>
+          )}
+        </div>
       </div>
 
       {room.phase === "lobby" && (
@@ -367,6 +448,27 @@ export default function RoomPage() {
                       복사
                     </Button>
                   </div>
+                )}
+              </div>
+
+              <div className="flex flex-col gap-1 rounded-md border border-dashed p-3">
+                <p className="text-sm font-medium">
+                  {IDLE_TIMEOUT_SECONDS}초 동안 아무 말이 없으면 방이 해체돼요
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  채팅을 보내거나 누군가 들어오면 다시 {IDLE_TIMEOUT_SECONDS}초로
+                  돌아가요. 해체되면 참가자 모두 홈으로 이동합니다.
+                </p>
+                {room.idleTimeoutRemainingMs !== null && (
+                  <p
+                    className={
+                      room.idleTimeoutRemainingMs <= IDLE_WARNING_MS
+                        ? "text-sm font-semibold text-destructive"
+                        : "text-sm text-muted-foreground"
+                    }
+                  >
+                    해체까지 {Math.ceil(room.idleTimeoutRemainingMs / 1000)}초 남았어요
+                  </p>
                 )}
               </div>
 
@@ -659,6 +761,11 @@ export default function RoomPage() {
         <Card className="mx-auto w-full max-w-2xl">
           <CardHeader>
             <CardTitle>최종 순위</CardTitle>
+            {room.endReason === "last_player_standing" && (
+              <p className="text-sm text-muted-foreground">
+                다른 참가자가 모두 나가 혼자 남아 승리했어요.
+              </p>
+            )}
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
             {room.ranking.map((r) => (

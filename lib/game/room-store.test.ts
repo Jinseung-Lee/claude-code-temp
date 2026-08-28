@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createRoom,
   getRoom,
+  getRoomView,
   joinRoom,
+  leaveRoom,
   listRooms,
   sendChatMessage,
   serializeForPlayer,
@@ -14,6 +16,7 @@ import {
 import { createInMemoryRoomBackend, mutateRoom, setRoomBackend } from "./room-repository";
 import {
   DELAY_ITEM_MS,
+  LOBBY_IDLE_TIMEOUT_MS,
   ROUND_DURATION_MS,
   ROUND_RESULT_MS,
   type ItemType,
@@ -389,5 +392,149 @@ describe("listRooms", () => {
     expect(serialized).not.toContain(answer);
     expect(serialized).not.toContain("itemQuestions");
     expect(serialized).not.toContain("rounds");
+  });
+});
+
+describe("leaveRoom", () => {
+  it("나간 참가자를 목록에서 제거한다", async () => {
+    const { code, host, others } = await setup(3);
+
+    const left = await leaveRoom(code, others[0].id);
+    expect(left).toEqual({ ok: true });
+
+    const room = await getRoom(code);
+    expect(room!.players.map((p) => p.id)).toEqual([host.id, others[1].id]);
+  });
+
+  it("게임 중 1명만 남으면 즉시 종료하고 남은 1명이 승리한다", async () => {
+    const { code, host, others } = await setup(2);
+
+    await leaveRoom(code, others[0].id);
+
+    const room = await getRoom(code);
+    expect(room!.phase).toBe("finished");
+    expect(room!.endReason).toBe("last_player_standing");
+
+    const view = serializeForPlayer(room!, host.id);
+    expect(view.ranking).not.toBeNull();
+    expect(view.ranking![0].id).toBe(host.id);
+    expect(view.ranking![0].rank).toBe(1);
+  });
+
+  it("대기실에서 1명이 남아도 종료하지 않고 계속 기다린다", async () => {
+    const { room } = await createRoom("호스트");
+    const joined = await joinRoom(room.code, "손님");
+    if ("error" in joined) throw new Error(joined.error);
+
+    await leaveRoom(room.code, joined.player.id);
+
+    const after = await getRoom(room.code);
+    expect(after!.phase).toBe("lobby");
+    expect(after!.players).toHaveLength(1);
+  });
+
+  it("방장이 나가면 가장 먼저 들어온 참가자가 새 방장이 된다", async () => {
+    const { room, player: host } = await createRoom("호스트");
+    const first = await joinRoom(room.code, "먼저");
+    if ("error" in first) throw new Error(first.error);
+    vi.setSystemTime(BASE_TIME + 1_000);
+    const second = await joinRoom(room.code, "나중");
+    if ("error" in second) throw new Error(second.error);
+
+    await leaveRoom(room.code, host.id);
+
+    const after = await getRoom(room.code);
+    expect(after!.hostId).toBe(first.player.id);
+    expect(after!.players.find((p) => p.id === first.player.id)!.isHost).toBe(true);
+    expect(after!.players.find((p) => p.id === second.player.id)!.isHost).toBe(false);
+  });
+
+  it("모두 나간 방은 목록에서 사라진다", async () => {
+    const { room, player: host } = await createRoom("호스트");
+
+    await leaveRoom(room.code, host.id);
+
+    expect(await listRooms()).toHaveLength(0);
+  });
+
+  it("참가자가 아닌 ID로 나가려 하면 거부한다", async () => {
+    const { room } = await createRoom("호스트");
+    expect(await leaveRoom(room.code, "없는-아이디")).toEqual({
+      error: "이 방의 참가자가 아닙니다.",
+    });
+  });
+});
+
+describe("대기실 무응답 해체", () => {
+  it("정해진 시간 동안 활동이 없으면 방을 해체한다", async () => {
+    const { room, player: host } = await createRoom("호스트");
+    const joined = await joinRoom(room.code, "손님");
+    if ("error" in joined) throw new Error(joined.error);
+
+    vi.setSystemTime(BASE_TIME + LOBBY_IDLE_TIMEOUT_MS);
+
+    const after = await getRoom(room.code);
+    expect(after!.phase).toBe("disbanded");
+    expect(after!.endReason).toBe("idle_disbanded");
+    expect(await listRooms()).toHaveLength(0);
+    // 해체된 방은 참가자에게도 더 이상 조회되지 않는다.
+    const view = await getRoomView(room.code, host.id);
+    expect("error" in view && view.status).toBe(410);
+  });
+
+  it("채팅을 보내면 해체 시각이 뒤로 밀린다", async () => {
+    const { room, player: host } = await createRoom("호스트");
+    const joined = await joinRoom(room.code, "손님");
+    if ("error" in joined) throw new Error(joined.error);
+
+    // 해체 직전에 채팅을 보내 타이머를 되돌린다.
+    vi.setSystemTime(BASE_TIME + LOBBY_IDLE_TIMEOUT_MS - 1_000);
+    const sent = await sendChatMessage(room.code, host.id, "아직 있어요");
+    expect("error" in sent).toBe(false);
+
+    vi.setSystemTime(BASE_TIME + LOBBY_IDLE_TIMEOUT_MS + 1_000);
+    const after = await getRoom(room.code);
+    expect(after!.phase).toBe("lobby");
+  });
+
+  it("게임이 시작된 방은 무응답으로 해체하지 않는다", async () => {
+    const { code } = await setup(2);
+
+    vi.setSystemTime(BASE_TIME + LOBBY_IDLE_TIMEOUT_MS * 3);
+
+    const after = await getRoom(code);
+    expect(after!.phase).not.toBe("disbanded");
+  });
+
+  it("해체된 방에는 새로 들어갈 수 없다", async () => {
+    const { room } = await createRoom("호스트");
+    vi.setSystemTime(BASE_TIME + LOBBY_IDLE_TIMEOUT_MS);
+    await getRoom(room.code); // 해체 처리를 확정한다
+
+    expect(await joinRoom(room.code, "지각")).toEqual({ error: "해체된 방입니다." });
+  });
+});
+
+describe("summarizeRoom: 방 목록 참가자", () => {
+  it("대기 중인 방은 순위 없이 참가자를 담는다", async () => {
+    const { room } = await createRoom("호스트");
+    await joinRoom(room.code, "손님");
+
+    const [summary] = await listRooms();
+    expect(summary.players).toHaveLength(2);
+    expect(summary.players[0]).toMatchObject({ nickname: "호스트", isHost: true, rank: null });
+    expect(summary.players[1]).toMatchObject({ nickname: "손님", isHost: false, rank: null });
+  });
+
+  it("진행 중인 방은 참가자를 순위 순으로 담는다", async () => {
+    const { code, others } = await setup(2);
+
+    // guest1이 먼저 맞혀 1승을 만든다.
+    const round = (await getRoom(code))!.rounds[0];
+    await submitAnswer(code, others[0].id, round.answer);
+
+    const [summary] = await listRooms();
+    expect(summary.players[0]).toMatchObject({ nickname: "guest1", rank: 1, roundWins: 1 });
+    expect(summary.players[1]).toMatchObject({ nickname: "host", rank: 2, roundWins: 0 });
   });
 });

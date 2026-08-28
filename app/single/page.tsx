@@ -2,15 +2,21 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { ShuffleIcon } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { ChevronDownIcon, ChevronUpIcon, LogOutIcon, ShuffleIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { isCorrectAnswer, maskWord } from "@/lib/game/chosung";
-import { getRememberedNickname, rememberNickname } from "@/lib/game/client-storage";
-import type { LeaderboardEntry } from "@/lib/game/leaderboard";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  NICKNAME_MAX_LENGTH,
+  getRememberedNickname,
+  rememberNickname,
+} from "@/lib/game/client-storage";
+import type { RankedLeaderboardEntry, RankedPage } from "@/lib/game/leaderboard";
 import { CATEGORIES, QUESTION_BANK, type Category } from "@/lib/game/questions";
 import { generateRandomNickname } from "@/lib/game/random-nickname";
 import { DIFFICULTY_LABEL, SINGLE_MODE_DURATION_MS, type Difficulty } from "@/lib/game/types";
@@ -41,6 +47,9 @@ interface ResultInfo {
   clearedAll: boolean;
   elapsedMs: number | null;
   clearedCount: number;
+  /** 저장된 내 기록이 전체에서 몇 위인지. 저장 실패 시 null. */
+  rank: number | null;
+  totalCount: number | null;
 }
 
 function shuffled<T>(items: T[]): T[] {
@@ -53,6 +62,7 @@ function shuffled<T>(items: T[]): T[] {
 }
 
 export default function SinglePage() {
+  const router = useRouter();
   const [phase, setPhase] = useState<Phase>("setup");
   const [nickname, setNickname] = useState("");
   const [nicknameError, setNicknameError] = useState<string | null>(null);
@@ -65,7 +75,11 @@ export default function SinglePage() {
   const [remainingMs, setRemainingMs] = useState(SINGLE_MODE_DURATION_MS);
   const [now, setNow] = useState(() => Date.now());
   const [resultInfo, setResultInfo] = useState<ResultInfo | null>(null);
-  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [leaderboard, setLeaderboard] = useState<RankedLeaderboardEntry[]>([]);
+  const [allEntries, setAllEntries] = useState<RankedLeaderboardEntry[] | null>(null);
+  const [allMeta, setAllMeta] = useState<Omit<RankedPage, "entries"> | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  const [loadingAll, setLoadingAll] = useState(false);
 
   const poolRef = useRef<string[]>([]);
   const spawnedCountRef = useRef(0);
@@ -97,8 +111,15 @@ export default function SinglePage() {
   const finishSession = useCallback(
     async (clearedAll: boolean, elapsedMs: number) => {
       const finalCount = clearedCountRef.current;
-      setResultInfo({ clearedAll, elapsedMs: clearedAll ? elapsedMs : null, clearedCount: finalCount });
+      setResultInfo({
+        clearedAll,
+        elapsedMs: clearedAll ? elapsedMs : null,
+        clearedCount: finalCount,
+        rank: null,
+        totalCount: null,
+      });
       setPhase("result");
+      // 순위 진입 여부와 무관하게 모든 기록을 남긴다.
       try {
         const res = await fetch("/api/leaderboard", {
           method: "POST",
@@ -113,13 +134,70 @@ export default function SinglePage() {
           }),
         });
         const data = await res.json();
-        if (res.ok) setLeaderboard(data.entries);
+        if (res.ok) {
+          setLeaderboard(data.entries);
+          setResultInfo((prev) =>
+            prev ? { ...prev, rank: data.rank ?? null, totalCount: data.totalCount ?? null } : prev,
+          );
+          // 전체 순위를 펼쳐 둔 상태면 방금 기록까지 반영해 다시 읽는다.
+          setAllEntries(null);
+          setAllMeta(null);
+        }
       } catch {
         // 랭킹 제출 실패는 조용히 무시한다(결과 화면은 이미 표시됨).
       }
     },
     [category, difficulty, nickname],
   );
+
+  /** 게임 종료 버튼. 진행 중이던 기록을 남긴 뒤 홈으로 보낸다. */
+  const quitToHome = useCallback(async () => {
+    const finalCount = clearedCountRef.current;
+    try {
+      await fetch("/api/leaderboard", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nickname,
+          category,
+          difficulty,
+          clearedAll: false,
+          elapsedMs: null,
+          clearedCount: finalCount,
+        }),
+      });
+    } catch {
+      // 저장에 실패해도 홈으로는 보내준다.
+    } finally {
+      router.push("/");
+    }
+  }, [category, difficulty, nickname, router]);
+
+  /**
+   * 전체 순위를 페이지 단위로 읽는다. `page`가 0이면 처음부터, 그보다 크면
+   * 이미 읽은 목록 뒤에 이어 붙인다.
+   */
+  const fetchAllEntries = useCallback(async (page: number) => {
+    setLoadingAll(true);
+    try {
+      const res = await fetch(`/api/leaderboard?scope=all&page=${page}`);
+      const data = (await res.json()) as RankedPage;
+      if (!res.ok) return;
+      const { entries, ...meta } = data;
+      setAllEntries((prev) => (page === 0 || prev === null ? entries : [...prev, ...entries]));
+      setAllMeta(meta);
+    } catch {
+      // 전체 순위 조회 실패는 TOP 10 표시에 영향을 주지 않는다.
+    } finally {
+      setLoadingAll(false);
+    }
+  }, []);
+
+  function toggleShowAll() {
+    const next = !showAll;
+    setShowAll(next);
+    if (next && allEntries === null) fetchAllEntries(0);
+  }
 
   useEffect(() => {
     if (phase !== "playing") return;
@@ -148,7 +226,12 @@ export default function SinglePage() {
       const remaining = SINGLE_MODE_DURATION_MS - elapsed;
       if (remaining <= 0) {
         setRemainingMs(0);
-        finishSession(clearedCountRef.current >= totalWords, elapsed);
+        // 틱 간격(150ms) 때문에 elapsed가 제한시간을 조금 넘을 수 있다.
+        // 서버는 제한시간을 넘는 클리어 시간을 거부하므로 잘라서 보낸다.
+        finishSession(
+          clearedCountRef.current >= totalWords,
+          Math.min(elapsed, SINGLE_MODE_DURATION_MS),
+        );
       } else {
         setRemainingMs(remaining);
       }
@@ -221,7 +304,7 @@ export default function SinglePage() {
                     value={nickname}
                     onChange={(e) => setNickname(e.target.value)}
                     placeholder="닉네임"
-                    maxLength={12}
+                    maxLength={NICKNAME_MAX_LENGTH}
                   />
                   <Button
                     type="button"
@@ -281,11 +364,17 @@ export default function SinglePage() {
 
         {phase === "playing" && (
           <div className="flex w-full flex-col gap-3">
-            <div className="flex items-center justify-between text-sm">
+            <div className="flex items-center justify-between gap-2 text-sm">
               <span>
                 클리어 <strong>{clearedCount}</strong> / {QUESTION_BANK[category].length}
               </span>
-              <span className="text-muted-foreground">{Math.ceil(remainingMs / 1000)}초</span>
+              <div className="flex items-center gap-2">
+                <span className="text-muted-foreground">{Math.ceil(remainingMs / 1000)}초</span>
+                <Button type="button" variant="outline" size="sm" onClick={quitToHome}>
+                  <LogOutIcon data-icon="inline-start" />
+                  게임 종료
+                </Button>
+              </div>
             </div>
             <div className="relative h-[420px] w-full overflow-hidden rounded-md border bg-muted/20">
               {fallingWords.map((w) => {
@@ -341,6 +430,13 @@ export default function SinglePage() {
                   </>
                 )}
               </p>
+              {resultInfo.rank !== null && (
+                <p className="text-sm text-muted-foreground">
+                  전체 {resultInfo.totalCount}개 기록 중{" "}
+                  <span className="font-semibold text-foreground">{resultInfo.rank}위</span>예요.
+                  기록은 저장했어요.
+                </p>
+              )}
               <div className="flex w-full gap-2">
                 <Button className="flex-1" onClick={start}>
                   다시 하기
@@ -368,10 +464,10 @@ export default function SinglePage() {
             {leaderboard.length === 0 && (
               <p className="text-sm text-muted-foreground">아직 기록이 없어요.</p>
             )}
-            {leaderboard.map((entry, index) => (
+            {leaderboard.map((entry) => (
               <div key={entry.id} className="flex items-center justify-between text-sm">
                 <span className="flex items-center gap-2">
-                  <Badge variant={index === 0 ? "default" : "outline"}>{index + 1}위</Badge>
+                  <Badge variant={entry.rank === 1 ? "default" : "outline"}>{entry.rank}위</Badge>
                   {entry.nickname}
                 </span>
                 <span className="text-muted-foreground">
@@ -379,6 +475,79 @@ export default function SinglePage() {
                 </span>
               </div>
             ))}
+
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="mt-1 gap-1 text-muted-foreground"
+              onClick={toggleShowAll}
+            >
+              전체 순위 보기
+              {showAll ? <ChevronUpIcon /> : <ChevronDownIcon />}
+            </Button>
+
+            {showAll && (
+              <>
+                {loadingAll && allEntries === null ? (
+                  <p className="text-sm text-muted-foreground">전체 순위를 불러오는 중이에요…</p>
+                ) : allEntries === null ? (
+                  <p className="text-sm text-muted-foreground">
+                    전체 순위를 불러오지 못했어요.
+                  </p>
+                ) : allEntries.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">아직 기록이 없어요.</p>
+                ) : (
+                  <>
+                    <p className="text-xs text-muted-foreground">
+                      저장된 기록 {allMeta?.totalCount ?? allEntries.length}개 중{" "}
+                      {allEntries.length}개 표시
+                    </p>
+                    {allMeta?.truncated && (
+                      <p className="text-xs text-destructive">
+                        기록이 매우 많아 오래된 일부는 순위 집계에서 제외됐어요.
+                      </p>
+                    )}
+                    <ScrollArea className="h-72 rounded-md border p-2">
+                      <div className="flex flex-col gap-2">
+                        {allEntries.map((entry) => (
+                          <div key={entry.id} className="flex flex-col gap-0.5">
+                            <div className="flex items-center justify-between gap-2 text-sm">
+                              <span className="flex items-center gap-2">
+                                <Badge variant={entry.rank === 1 ? "default" : "outline"}>
+                                  {entry.rank}위
+                                </Badge>
+                                {entry.nickname}
+                              </span>
+                              <span className="text-muted-foreground">
+                                {entry.clearedAll
+                                  ? formatMs(entry.elapsedMs ?? 0)
+                                  : `${entry.clearedCount}개`}
+                              </span>
+                            </div>
+                            <span className="text-xs text-muted-foreground">
+                              {entry.category} · {DIFFICULTY_LABEL[entry.difficulty]}난이도 ·{" "}
+                              {new Date(entry.createdAt).toLocaleString("ko-KR")}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </ScrollArea>
+                    {allMeta?.hasMore && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={loadingAll}
+                        onClick={() => fetchAllEntries((allMeta?.page ?? 0) + 1)}
+                      >
+                        {loadingAll ? "불러오는 중…" : "더 보기"}
+                      </Button>
+                    )}
+                  </>
+                )}
+              </>
+            )}
           </CardContent>
         </Card>
       </aside>

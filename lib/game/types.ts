@@ -37,7 +37,7 @@ export interface Player {
   shieldActive: boolean;
 }
 
-export type RoomPhase = "lobby" | "round_active" | "round_result" | "finished";
+export type RoomPhase = "lobby" | "round_active" | "round_result" | "finished" | "disbanded";
 
 export interface PendingAnswer {
   playerId: string;
@@ -93,6 +93,12 @@ export const SINGLE_MODE_DURATION_MS = 60_000;
 
 export const CHAT_HISTORY_LIMIT = 100;
 
+/**
+ * 대기실에서 이 시간 동안 아무 말도 없으면 방을 해체하고 참가자를 홈으로
+ * 보낸다. 방을 만들어 두고 방치한 방이 목록에 남는 것을 막는다.
+ */
+export const LOBBY_IDLE_TIMEOUT_MS = 20_000;
+
 export interface Room {
   code: string;
   hostId: string;
@@ -104,7 +110,18 @@ export interface Room {
   currentRoundIndex: number;
   createdAt: number;
   chatMessages: ChatMessage[];
+  /** 대기실 무응답 해체 판정 기준. 채팅·입퇴장·설정 변경이 있을 때 갱신한다. */
+  lastActivityAt: number;
+  /** 게임이 정상 10라운드가 아닌 이유로 끝났을 때의 사유. */
+  endReason: RoomEndReason | null;
 }
+
+/**
+ * 방이 10라운드를 다 돌지 않고 끝난 이유.
+ * - `last_player_standing`: 이탈로 1명만 남아 그 1명의 승리로 끝났다.
+ * - `idle_disbanded`: 대기실에서 무응답 시간이 지나 방이 해체되었다.
+ */
+export type RoomEndReason = "last_player_standing" | "idle_disbanded";
 
 export interface RankedPlayer {
   id: string;
@@ -167,6 +184,17 @@ export interface RoomSummary {
   /** 새 참가자를 받을 수 있는지. 로비이고 자리가 남은 경우에만 true. */
   joinable: boolean;
   createdAt: number;
+  /** 참가 중인 사람들. 게임 중인 방은 순위 순, 대기 중인 방은 입장 순이다. */
+  players: RoomSummaryPlayer[];
+}
+
+/** 방 목록에 보여줄 참가자 한 줄. */
+export interface RoomSummaryPlayer {
+  nickname: string;
+  isHost: boolean;
+  /** 게임이 진행 중인 방에서만 채운다. 대기 중인 방은 null. */
+  rank: number | null;
+  roundWins: number;
 }
 
 export interface ClientRoomView {
@@ -181,4 +209,7 @@ export interface ClientRoomView {
   ranking: RankedPlayer[] | null;
   chatMessages: ChatMessage[];
   serverTime: number;
+  endReason: RoomEndReason | null;
+  /** 대기실 무응답 해체까지 남은 시간(밀리초). 대기실이 아니면 null. */
+  idleTimeoutRemainingMs: number | null;
 }

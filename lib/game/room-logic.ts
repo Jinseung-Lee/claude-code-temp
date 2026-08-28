@@ -5,6 +5,7 @@ import { computeRanking } from "./ranking";
 import {
   CHAT_HISTORY_LIMIT,
   DELAY_ITEM_MS,
+  LOBBY_IDLE_TIMEOUT_MS,
   MAX_PLAYERS,
   ROUND_DURATION_MS,
   ROUND_RESULT_MS,
@@ -18,6 +19,7 @@ import {
   type Player,
   type Room,
   type RoomSummary,
+  type RoomSummaryPlayer,
   type RoundState,
 } from "./types";
 
@@ -109,6 +111,25 @@ function currentRound(room: Room): RoundState | undefined {
 export function tick(room: Room): void {
   const now = Date.now();
 
+  if (room.phase === "disbanded" || room.phase === "finished") return;
+
+  // 대기실에서 정해진 시간 동안 아무 활동이 없으면 방을 해체한다.
+  if (room.phase === "lobby" && now - room.lastActivityAt >= LOBBY_IDLE_TIMEOUT_MS) {
+    room.phase = "disbanded";
+    room.endReason = "idle_disbanded";
+    return;
+  }
+
+  // 게임 중 이탈로 1명만 남으면 남은 라운드를 진행하지 않고 즉시 끝낸다.
+  if (
+    (room.phase === "round_active" || room.phase === "round_result") &&
+    room.players.length <= 1
+  ) {
+    room.phase = "finished";
+    room.endReason = "last_player_standing";
+    return;
+  }
+
   if (room.phase === "round_active") {
     const round = currentRound(room);
     if (!round) return;
@@ -166,17 +187,54 @@ export function makeRoom(code: string, hostNickname: string): { room: Room; play
     currentRoundIndex: -1,
     createdAt: Date.now(),
     chatMessages: [],
+    lastActivityAt: Date.now(),
+    endReason: null,
   };
   return { room, player: host };
 }
 
 export function addPlayer(room: Room, nickname: string): { player: Player } | { error: string } {
+  if (room.phase === "disbanded") return { error: "해체된 방입니다." };
   if (room.phase !== "lobby") return { error: "이미 게임이 시작된 방입니다." };
   if (room.players.length >= MAX_PLAYERS) return { error: "방 인원이 가득 찼습니다(최대 4인)." };
 
   const player = makePlayer(nickname, false);
   room.players.push(player);
+  room.lastActivityAt = Date.now();
   return { player };
+}
+
+/**
+ * 참가자를 방에서 뺀다. 방장이 나가면 남은 사람 중 가장 먼저 들어온 사람이
+ * 새 방장이 된다. 게임 중이었다면 남은 인원에 따라 tick이 종료를 판정한다.
+ */
+export function removePlayer(room: Room, playerId: string): { ok: true } | { error: string } {
+  const index = room.players.findIndex((p) => p.id === playerId);
+  if (index === -1) return { error: "이 방의 참가자가 아닙니다." };
+
+  room.players.splice(index, 1);
+  room.lastActivityAt = Date.now();
+
+  if (room.players.length === 0) {
+    // 아무도 남지 않은 방은 목록에서 감추고 다시 들어올 수 없게 한다.
+    room.phase = "disbanded";
+    room.endReason = "idle_disbanded";
+    return { ok: true };
+  }
+
+  if (room.hostId === playerId) {
+    const nextHost = room.players.reduce((earliest, p) =>
+      p.joinedAt < earliest.joinedAt ? p : earliest,
+    );
+    room.hostId = nextHost.id;
+    room.players.forEach((p) => {
+      p.isHost = p.id === nextHost.id;
+    });
+  }
+
+  // 게임 중 1인만 남은 경우의 종료 판정은 tick이 한 곳에서 처리한다.
+  tick(room);
+  return { ok: true };
 }
 
 export function beginGame(
@@ -194,6 +252,7 @@ export function beginGame(
   room.currentRoundIndex = 0;
   room.rounds = [startNewRound(room, 0, [])];
   room.phase = "round_active";
+  room.lastActivityAt = Date.now();
   return { ok: true };
 }
 
@@ -270,6 +329,7 @@ export function appendChatMessage(
     createdAt: Date.now(),
   };
   room.chatMessages.push(message);
+  room.lastActivityAt = Date.now();
   if (room.chatMessages.length > CHAT_HISTORY_LIMIT) {
     room.chatMessages = room.chatMessages.slice(-CHAT_HISTORY_LIMIT);
   }
@@ -397,12 +457,38 @@ export function serializeForPlayer(room: Room, requestingPlayerId: string): Clie
     ranking: room.phase === "finished" ? computeRanking(room.players) : null,
     chatMessages: room.chatMessages.slice(-50),
     serverTime: Date.now(),
+    endReason: room.endReason,
+    idleTimeoutRemainingMs:
+      room.phase === "lobby"
+        ? Math.max(0, room.lastActivityAt + LOBBY_IDLE_TIMEOUT_MS - Date.now())
+        : null,
   };
 }
 
-/** 방 목록에 쓸 요약을 만든다. 진행 중인 정답은 절대 포함하지 않는다. */
+/**
+ * 방 목록에 쓸 요약을 만든다. 진행 중인 정답은 절대 포함하지 않는다.
+ *
+ * 게임이 진행 중인 방은 참가자를 순위 순으로 담고, 대기 중인 방은 순위를
+ * 매길 근거가 없으므로 입장 순서 그대로 담는다.
+ */
 export function summarizeRoom(room: Room): RoomSummary {
   const host = room.players.find((p) => p.id === room.hostId);
+  const inProgress = room.phase === "round_active" || room.phase === "round_result";
+
+  const players: RoomSummaryPlayer[] = inProgress
+    ? computeRanking(room.players).map((ranked) => ({
+        nickname: ranked.nickname,
+        isHost: ranked.id === room.hostId,
+        rank: ranked.rank,
+        roundWins: ranked.roundWins,
+      }))
+    : room.players.map((p) => ({
+        nickname: p.nickname,
+        isHost: p.id === room.hostId,
+        rank: null,
+        roundWins: p.roundWins,
+      }));
+
   return {
     code: room.code,
     hostNickname: host?.nickname ?? "알 수 없음",
@@ -413,5 +499,6 @@ export function summarizeRoom(room: Room): RoomSummary {
     difficulty: room.difficulty,
     joinable: room.phase === "lobby" && room.players.length < MAX_PLAYERS,
     createdAt: room.createdAt,
+    players,
   };
 }

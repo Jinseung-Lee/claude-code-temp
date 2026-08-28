@@ -27,3 +27,11 @@ export function rememberNickname(nickname: string): void {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(NICKNAME_KEY, nickname);
 }
+
+/** 닉네임을 아직 만들지 않았는지. 홈에서 닉네임 입력 화면을 띄울 기준이다. */
+export function hasNickname(): boolean {
+  return getRememberedNickname().trim().length > 0;
+}
+
+/** 닉네임 최대 길이. 입력창과 서버 검증이 같은 값을 쓴다. */
+export const NICKNAME_MAX_LENGTH = 12;

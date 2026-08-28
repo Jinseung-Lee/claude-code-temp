@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ShuffleIcon } from "lucide-react";
@@ -8,7 +8,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { storePlayerId } from "@/lib/game/client-storage";
+import {
+  NICKNAME_MAX_LENGTH,
+  getRememberedNickname,
+  rememberNickname,
+  storePlayerId,
+} from "@/lib/game/client-storage";
 import { generateRandomNickname } from "@/lib/game/random-nickname";
 
 export default function NewRoomPage() {
@@ -17,6 +22,12 @@ export default function NewRoomPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    // 홈에서 만든 닉네임을 그대로 쓴다. 다시 입력하지 않아도 되게 채워 둔다.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setNickname(getRememberedNickname());
+  }, []);
+
   async function createRoom() {
     if (!nickname.trim()) {
       setError("닉네임을 입력해 주세요.");
@@ -24,6 +35,7 @@ export default function NewRoomPage() {
     }
     setLoading(true);
     setError(null);
+    rememberNickname(nickname.trim());
     try {
       const res = await fetch("/api/rooms", {
         method: "POST",
@@ -60,7 +72,7 @@ export default function NewRoomPage() {
                 onChange={(e) => setNickname(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && createRoom()}
                 placeholder="방장 닉네임"
-                maxLength={12}
+                maxLength={NICKNAME_MAX_LENGTH}
                 autoFocus
               />
               <Button

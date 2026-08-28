@@ -6,13 +6,14 @@ import {
   beginGame,
   generateRoomCode,
   makeRoom,
+  removePlayer,
   serializeForPlayer,
   summarizeRoom,
   tick,
   useItem,
 } from "./room-logic";
 import { insertRoom, listRecentRooms, mutateRoom } from "./room-repository";
-import type { Difficulty, Player, Room, RoomSummary } from "./types";
+import { LOBBY_IDLE_TIMEOUT_MS, type Difficulty, type Player, type Room, type RoomSummary } from "./types";
 
 export { serializeForPlayer } from "./room-logic";
 
@@ -44,6 +45,7 @@ function snapshotTimeState(room: Room): string {
     round?.winnerId ?? "",
     round?.endedAt ?? "",
     round?.resultUntil ?? "",
+    room.endReason ?? "",
   ].join("|");
 }
 
@@ -84,6 +86,24 @@ export async function joinRoom(
   if (!outcome) return { error: "존재하지 않는 방입니다." };
   if ("error" in outcome.result) return { error: outcome.result.error };
   return { room: outcome.room, player: outcome.result.player };
+}
+
+/**
+ * 참가자를 방에서 뺀다. 홈으로 나가는 버튼과 방 이탈 API가 함께 쓴다.
+ * 방장 이전, 1인 생존 종료, 빈 방 해체는 모두 room-logic이 판정한다.
+ */
+export async function leaveRoom(
+  code: string,
+  playerId: string,
+): Promise<{ ok: true } | { error: string }> {
+  const outcome = await mutateRoom(code, (room) => {
+    const result = removePlayer(room, playerId);
+    return { result, persist: !("error" in result) };
+  });
+
+  if (!outcome) return { error: "존재하지 않는 방입니다." };
+  if ("error" in outcome.result) return { error: outcome.result.error };
+  return { ok: true };
 }
 
 export async function startGame(
@@ -171,10 +191,13 @@ export async function getRoomView(
   playerId: string,
 ): Promise<
   | { view: ReturnType<typeof serializeForPlayer> }
-  | { error: string; status: 403 | 404 }
+  | { error: string; status: 403 | 404 | 410 }
 > {
   const room = await getRoom(code);
   if (!room) return { error: "존재하지 않는 방입니다.", status: 404 };
+  if (room.phase === "disbanded") {
+    return { error: "20초 동안 활동이 없어 방이 해체되었습니다.", status: 410 };
+  }
   if (!room.players.some((p) => p.id === playerId)) {
     return { error: "이 방의 참가자가 아닙니다.", status: 403 };
   }
@@ -200,7 +223,13 @@ export async function listRooms(): Promise<RoomSummary[]> {
   const now = Date.now();
 
   return rooms
-    .filter((room) => room.phase !== "finished")
+    .filter((room) => room.phase !== "finished" && room.phase !== "disbanded")
+    // 무응답으로 해체될 시각이 이미 지난 방은 목록에서도 숨긴다. 실제 해체
+    // 처리는 그 방을 조회하는 쪽의 tick이 저장한다.
+    .filter(
+      (room) =>
+        room.phase !== "lobby" || now - room.lastActivityAt < LOBBY_IDLE_TIMEOUT_MS,
+    )
     .filter((room) => now - room.createdAt < ROOM_LIST_MAX_AGE_MS)
     .map(summarizeRoom)
     .sort((a, b) => {
