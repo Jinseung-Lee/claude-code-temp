@@ -14,7 +14,13 @@ import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { getStoredPlayerId, storePlayerId } from "@/lib/game/client-storage";
+import {
+  clearStoredPlayerId,
+  getRememberedNickname,
+  getStoredPlayerId,
+  rememberNickname,
+  storePlayerId,
+} from "@/lib/game/client-storage";
 import { CATEGORIES, type Category } from "@/lib/game/questions";
 import { rankByScore } from "@/lib/game/ranking";
 import { generateRandomNickname } from "@/lib/game/random-nickname";
@@ -58,10 +64,11 @@ export default function RoomPage() {
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // sessionStorage는 클라이언트에서만 읽을 수 있어(서버-클라이언트 하이드레이션 불일치를
+    // localStorage는 클라이언트에서만 읽을 수 있어(서버-클라이언트 하이드레이션 불일치를
     // 피하려고) 마운트 후 한 번 동기화한다.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPlayerId(getStoredPlayerId(code));
+    setNickname(getRememberedNickname());
     setHydrated(true);
   }, [code]);
 
@@ -70,6 +77,14 @@ export default function RoomPage() {
     const res = await fetch(`/api/rooms/${code}?playerId=${playerId}`);
     const data = await res.json();
     if (!res.ok) {
+      // 저장된 ID가 이 방에 없으면(다른 브라우저 프로필과 localStorage를
+      // 공유하거나, 방이 다시 만들어진 경우) ID를 버리고 생성 화면으로 돌린다.
+      if (res.status === 403) {
+        clearStoredPlayerId(code);
+        setRoom(null);
+        setPlayerId(null);
+        return;
+      }
       setFetchError(data.error ?? "방 정보를 불러오지 못했습니다.");
       return;
     }
@@ -118,8 +133,9 @@ export default function RoomPage() {
   }, [room?.chatMessages.length]);
 
   async function join() {
-    if (!nickname.trim()) {
-      setJoinError("닉네임을 입력해 주세요.");
+    const trimmed = nickname.trim();
+    if (!trimmed) {
+      setJoinError("ID를 입력해 주세요.");
       return;
     }
     setJoining(true);
@@ -129,13 +145,17 @@ export default function RoomPage() {
       const res = await fetch(`/api/rooms/${code}/join`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ nickname, existingPlayerId: getStoredPlayerId(code) ?? undefined }),
+        body: JSON.stringify({
+          nickname: trimmed,
+          existingPlayerId: getStoredPlayerId(code) ?? undefined,
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
         setJoinError(data.error ?? "참여하지 못했습니다.");
         return;
       }
+      rememberNickname(trimmed);
       storePlayerId(code, data.playerId);
       setPlayerId(data.playerId);
     } catch {
@@ -241,14 +261,14 @@ export default function RoomPage() {
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="nickname">닉네임</Label>
+              <Label htmlFor="nickname">ID (닉네임)</Label>
               <div className="flex gap-2">
                 <Input
                   id="nickname"
                   value={nickname}
                   onChange={(e) => setNickname(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && join()}
-                  placeholder="내 닉네임"
+                  placeholder="내 ID"
                   maxLength={12}
                   autoFocus
                 />
@@ -264,8 +284,11 @@ export default function RoomPage() {
               </div>
             </div>
             {joinError && <p className="text-sm text-destructive">{joinError}</p>}
+            <p className="text-xs text-muted-foreground">
+              방 안에서 이미 쓰이는 ID는 만들 수 없어요.
+            </p>
             <Button onClick={join} disabled={joining}>
-              {joining ? "참여하는 중..." : "참여하기"}
+              {joining ? "참여하는 중..." : "ID 만들고 참여하기"}
             </Button>
           </CardContent>
         </Card>

@@ -84,6 +84,34 @@ describe("Supabase 설정이 없는 환경", () => {
   });
 });
 
+describe("ID 중복 방지", () => {
+  it("이미 쓰이는 ID로는 참여할 수 없다", async () => {
+    const { room } = await createRoom("초코");
+    const result = await joinRoom(room.code, "초코");
+    expect(result).toEqual({ error: "이미 사용 중인 ID입니다. 다른 ID를 만들어 주세요." });
+  });
+
+  it("대소문자와 공백만 다른 ID도 중복으로 본다", async () => {
+    const { room } = await createRoom("Choco");
+    const result = await joinRoom(room.code, "  choco ");
+    expect("error" in result).toBe(true);
+  });
+
+  it("다른 ID로 다시 만들면 참여할 수 있다", async () => {
+    const { room } = await createRoom("초코");
+    const result = await joinRoom(room.code, "바닐라");
+    expect("error" in result).toBe(false);
+  });
+
+  it("같은 playerId로 재입장할 때는 중복 검사를 하지 않는다", async () => {
+    const { room, player } = await createRoom("초코");
+    const rejoined = await joinRoom(room.code, "초코", player.id);
+    expect("error" in rejoined).toBe(false);
+    if ("error" in rejoined) throw new Error(rejoined.error);
+    expect(rejoined.player.id).toBe(player.id);
+  });
+});
+
 describe("createRoom / joinRoom", () => {
   it("creates a room with the host as the sole lobby player", async () => {
     const { room, player } = await createRoom("호스트");

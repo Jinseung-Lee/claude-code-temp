@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { storePlayerId } from "@/lib/game/client-storage";
+import { rememberNickname, storePlayerId } from "@/lib/game/client-storage";
 import { generateRandomNickname } from "@/lib/game/random-nickname";
 
 export default function NewRoomPage() {
@@ -18,8 +18,9 @@ export default function NewRoomPage() {
   const [loading, setLoading] = useState(false);
 
   async function createRoom() {
-    if (!nickname.trim()) {
-      setError("닉네임을 입력해 주세요.");
+    const trimmed = nickname.trim();
+    if (!trimmed) {
+      setError("ID를 입력해 주세요.");
       return;
     }
     setLoading(true);
@@ -28,13 +29,14 @@ export default function NewRoomPage() {
       const res = await fetch("/api/rooms", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ nickname }),
+        body: JSON.stringify({ nickname: trimmed }),
       });
       const data = await res.json();
       if (!res.ok) {
         setError(data.error ?? "방을 만들지 못했습니다.");
         return;
       }
+      rememberNickname(trimmed);
       storePlayerId(data.code, data.playerId);
       router.push(`/rooms/${data.code}`);
     } catch {
@@ -52,14 +54,14 @@ export default function NewRoomPage() {
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
-            <Label htmlFor="nickname">닉네임</Label>
+            <Label htmlFor="nickname">ID (닉네임)</Label>
             <div className="flex gap-2">
               <Input
                 id="nickname"
                 value={nickname}
                 onChange={(e) => setNickname(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && createRoom()}
-                placeholder="방장 닉네임"
+                placeholder="방장 ID"
                 maxLength={12}
                 autoFocus
               />
