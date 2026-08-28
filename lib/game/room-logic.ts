@@ -193,10 +193,26 @@ export function makeRoom(code: string, hostNickname: string): { room: Room; play
   return { room, player: host };
 }
 
+/**
+ * 닉네임 비교용 정규화. 앞뒤 공백과 대소문자 차이만으로 같은 이름이
+ * 둘 생기면 화면에서 서로를 구분할 수 없다.
+ */
+export function normalizeNickname(nickname: string): string {
+  return nickname.trim().toLowerCase();
+}
+
+export function isNicknameTaken(room: Room, nickname: string): boolean {
+  const target = normalizeNickname(nickname);
+  return room.players.some((p) => normalizeNickname(p.nickname) === target);
+}
+
 export function addPlayer(room: Room, nickname: string): { player: Player } | { error: string } {
   if (room.phase === "disbanded") return { error: "해체된 방입니다." };
   if (room.phase !== "lobby") return { error: "이미 게임이 시작된 방입니다." };
   if (room.players.length >= MAX_PLAYERS) return { error: "방 인원이 가득 찼습니다(최대 4인)." };
+  if (isNicknameTaken(room, nickname)) {
+    return { error: "이미 사용 중인 ID입니다. 다른 ID를 만들어 주세요." };
+  }
 
   const player = makePlayer(nickname, false);
   room.players.push(player);

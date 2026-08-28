@@ -13,7 +13,12 @@ import {
   submitItemQuestionAnswer,
   applyItemUse,
 } from "./room-store";
-import { createInMemoryRoomBackend, mutateRoom, setRoomBackend } from "./room-repository";
+import {
+  createInMemoryRoomBackend,
+  isEphemeralStorageUnsafe,
+  mutateRoom,
+  setRoomBackend,
+} from "./room-repository";
 import {
   DELAY_ITEM_MS,
   LOBBY_IDLE_TIMEOUT_MS,
@@ -84,6 +89,69 @@ describe("Supabase 설정이 없는 환경", () => {
     expect(reloaded?.players[0].id).toBe(player.id);
 
     vi.unstubAllEnvs();
+  });
+});
+
+describe("서버리스 인메모리 폴백 감지", () => {
+  it("Vercel에서 Supabase 설정이 없으면 위험 상태로 본다", () => {
+    setRoomBackend(null);
+    vi.stubEnv("VERCEL", "1");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "");
+    vi.stubEnv("SUPABASE_SECRET_KEY", "");
+
+    expect(isEphemeralStorageUnsafe()).toBe(true);
+
+    vi.unstubAllEnvs();
+  });
+
+  it("Supabase가 설정돼 있으면 위험 상태가 아니다", () => {
+    setRoomBackend(null);
+    vi.stubEnv("VERCEL", "1");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co");
+    vi.stubEnv("SUPABASE_SECRET_KEY", "secret");
+
+    expect(isEphemeralStorageUnsafe()).toBe(false);
+
+    vi.unstubAllEnvs();
+  });
+
+  it("Vercel이 아닌 환경(로컬 개발)에서는 폴백을 허용한다", () => {
+    setRoomBackend(null);
+    vi.stubEnv("VERCEL", "");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "");
+    vi.stubEnv("SUPABASE_SECRET_KEY", "");
+
+    expect(isEphemeralStorageUnsafe()).toBe(false);
+
+    vi.unstubAllEnvs();
+  });
+});
+
+describe("ID 중복 방지", () => {
+  it("이미 쓰이는 ID로는 참여할 수 없다", async () => {
+    const { room } = await createRoom("초코");
+    const result = await joinRoom(room.code, "초코");
+    expect(result).toEqual({ error: "이미 사용 중인 ID입니다. 다른 ID를 만들어 주세요." });
+  });
+
+  it("대소문자와 공백만 다른 ID도 중복으로 본다", async () => {
+    const { room } = await createRoom("Choco");
+    const result = await joinRoom(room.code, "  choco ");
+    expect("error" in result).toBe(true);
+  });
+
+  it("다른 ID로 다시 만들면 참여할 수 있다", async () => {
+    const { room } = await createRoom("초코");
+    const result = await joinRoom(room.code, "바닐라");
+    expect("error" in result).toBe(false);
+  });
+
+  it("같은 playerId로 재입장할 때는 중복 검사를 하지 않는다", async () => {
+    const { room, player } = await createRoom("초코");
+    const rejoined = await joinRoom(room.code, "초코", player.id);
+    expect("error" in rejoined).toBe(false);
+    if ("error" in rejoined) throw new Error(rejoined.error);
+    expect(rejoined.player.id).toBe(player.id);
   });
 });
 

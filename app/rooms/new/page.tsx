@@ -29,24 +29,25 @@ export default function NewRoomPage() {
   }, []);
 
   async function createRoom() {
-    if (!nickname.trim()) {
-      setError("닉네임을 입력해 주세요.");
+    const trimmed = nickname.trim();
+    if (!trimmed) {
+      setError("ID를 입력해 주세요.");
       return;
     }
     setLoading(true);
     setError(null);
-    rememberNickname(nickname.trim());
     try {
       const res = await fetch("/api/rooms", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ nickname }),
+        body: JSON.stringify({ nickname: trimmed }),
       });
       const data = await res.json();
       if (!res.ok) {
         setError(data.error ?? "방을 만들지 못했습니다.");
         return;
       }
+      rememberNickname(trimmed);
       storePlayerId(data.code, data.playerId);
       router.push(`/rooms/${data.code}`);
     } catch {
@@ -64,14 +65,14 @@ export default function NewRoomPage() {
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
-            <Label htmlFor="nickname">닉네임</Label>
+            <Label htmlFor="nickname">ID (닉네임)</Label>
             <div className="flex gap-2">
               <Input
                 id="nickname"
                 value={nickname}
                 onChange={(e) => setNickname(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && createRoom()}
-                placeholder="방장 닉네임"
+                placeholder="방장 ID"
                 maxLength={NICKNAME_MAX_LENGTH}
                 autoFocus
               />
