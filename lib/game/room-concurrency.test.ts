@@ -38,6 +38,10 @@ function withLatency(base: RoomBackend, ms: number): RoomBackend {
       await wait();
       return base.listRecent(limit);
     },
+    async remove(code) {
+      await wait();
+      return base.remove(code);
+    },
   };
 }
 

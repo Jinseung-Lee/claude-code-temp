@@ -4,9 +4,11 @@ import { pickRandomQuestion } from "./questions";
 import { computeRanking } from "./ranking";
 import {
   CHAT_HISTORY_LIMIT,
+  DISBANDED_RETENTION_MS,
   DELAY_ITEM_MS,
   LOBBY_IDLE_TIMEOUT_MS,
   MAX_PLAYERS,
+  MIN_PLAYERS,
   ROUND_DURATION_MS,
   ROUND_RESULT_MS,
   TOTAL_ROUNDS,
@@ -233,8 +235,9 @@ export function removePlayer(room: Room, playerId: string): { ok: true } | { err
 
   if (room.players.length === 0) {
     // 아무도 남지 않은 방은 목록에서 감추고 다시 들어올 수 없게 한다.
+    // 무응답 해체와 사유를 구분해, 안내 문구가 실제 원인과 맞게 한다.
     room.phase = "disbanded";
-    room.endReason = "idle_disbanded";
+    room.endReason = "all_left";
     return { ok: true };
   }
 
@@ -253,6 +256,34 @@ export function removePlayer(room: Room, playerId: string): { ok: true } | { err
   return { ok: true };
 }
 
+/**
+ * 방이 끝났는지 여부. `finished`와 `disbanded`는 더 진행될 일이 없는
+ * 종착 상태다. 페이즈 판정 자체는 `tick`과 `removePlayer`가 하고, 여기서는
+ * 결과만 읽는다.
+ */
+export function isRoomOver(room: Room): boolean {
+  return room.phase === "finished" || room.phase === "disbanded";
+}
+
+/**
+ * 방을 저장소에서 지워도 되는지 판단한다.
+ *
+ * `finished`는 곧바로 지운다. 결과 화면에 필요한 상태는 종료를 확정한
+ * 응답에 이미 실려 나가므로, 행을 남겨둘 이유가 없다.
+ *
+ * `disbanded`는 바로 지우지 않는다. 지우면 "해체되었습니다"(410)와
+ * "존재하지 않는 방입니다"(404)를 구분할 수 없어, 대기하던 참가자가
+ * 방이 왜 사라졌는지 알 수 없게 된다. 해체 사유를 알려줄 수 있는 동안만
+ * 남겨두고 그 뒤에 지운다.
+ */
+export function isRoomDeletable(room: Room, now: number = Date.now()): boolean {
+  if (room.phase === "finished") return true;
+  if (room.phase === "disbanded") {
+    return now - room.lastActivityAt >= DISBANDED_RETENTION_MS;
+  }
+  return false;
+}
+
 export function beginGame(
   room: Room,
   actorId: string,
@@ -261,7 +292,8 @@ export function beginGame(
 ): { ok: true } | { error: string } {
   if (room.hostId !== actorId) return { error: "방장만 게임을 시작할 수 있습니다." };
   if (room.phase !== "lobby") return { error: "이미 게임이 시작되었습니다." };
-  if (room.players.length < 2) return { error: "2명 이상 모여야 시작할 수 있습니다." };
+  if (room.players.length < MIN_PLAYERS)
+    return { error: `${MIN_PLAYERS}명 이상 모여야 시작할 수 있습니다.` };
 
   room.category = category;
   room.difficulty = difficulty;

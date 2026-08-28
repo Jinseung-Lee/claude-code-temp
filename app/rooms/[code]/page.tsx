@@ -43,6 +43,11 @@ const BADGE_VISIBLE_EFFECTS = new Set(Object.keys(EFFECT_LABEL));
 
 const POLL_MS = 700;
 
+/** 더 진행될 일이 없는 종착 상태. 서버는 이 시점에 방을 지운다. */
+function isRoomOverPhase(phase: string | undefined): boolean {
+  return phase === "finished" || phase === "disbanded";
+}
+
 /** 화면 문구에 쓰는 무응답 해체 시간(초). 서버 상수와 같은 값을 보여준다. */
 const IDLE_TIMEOUT_SECONDS = Math.round(LOBBY_IDLE_TIMEOUT_MS / 1000);
 
@@ -98,7 +103,12 @@ export default function RoomPage() {
   const [chatText, setChatText] = useState("");
   const [itemQuestionAnswer, setItemQuestionAnswer] = useState("");
   const [itemQuestionWrongFlash, setItemQuestionWrongFlash] = useState(false);
+  const [roomClosed, setRoomClosed] = useState(false);
   const answeredRoundRef = useRef<number | null>(null);
+  // 폴링 콜백에서 최신 값을 읽되, 의존성 변화로 폴링을 재시작하지 않게 ref로 둔다.
+  const roomRef = useRef<ClientRoomView | null>(null);
+  const roomClosedRef = useRef(false);
+  const playerIdRef = useRef<string | null>(null);
   const clearedEffectIdsRef = useRef<Set<string>>(new Set());
   const chatScrollRef = useRef<HTMLDivElement>(null);
   // 자동 참여를 한 번만 시도한다. 실패했을 때 무한 재시도로 도는 것을 막는다.
@@ -119,7 +129,19 @@ export default function RoomPage() {
     const res = await fetch(`/api/rooms/${code}?playerId=${playerId}`);
     const data = await res.json();
     if (!res.ok) {
-      // 저장된 ID가 이 방에 없으면(방이 다시 만들어졌거나 ID가 어긋난 경우)
+      // 방은 게임 한 판만 살아 있고, 끝나거나 인원이 부족해지면 서버가
+      // 지운다. 방이 사라진 것은 오류가 아니라 "이 방은 닫혔다"는 정상 종료다.
+      if (res.status === 404) {
+        clearStoredPlayerId(code);
+        if (roomClosedRef.current) return;
+        roomClosedRef.current = true;
+        setRoomClosed(true);
+        // 아직 아무 상태도 못 받았으면 보여줄 결과가 없으므로 ID 화면으로 돌린다.
+        setPlayerId((current) => (roomRef.current ? current : null));
+        return;
+      }
+      // 403은 방은 있지만 내가 그 방의 참가자가 아닌 경우다(저장된 ID가
+      // 어긋났거나 방이 다시 만들어졌다). 방이 닫힌 것과는 다르므로
       // ID를 버리고 생성 화면으로 돌린다.
       if (res.status === 403) {
         clearStoredPlayerId(code);
@@ -140,12 +162,14 @@ export default function RoomPage() {
 
   useEffect(() => {
     if (!playerId) return;
+    // 게임이 끝나면 서버가 방을 지우므로 더 물어볼 것이 없다. 계속
+    // 폴링하면 404가 돌아와 최종 순위 화면을 덮는다.
+    if (isRoomOverPhase(room?.phase) || roomClosed) return;
     // 방 상태는 실시간 서버 푸시 없이 짧은 주기로 폴링해 동기화한다(이 프로젝트 규모에 맞춘 단순화).
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchRoom();
     const timer = setInterval(fetchRoom, POLL_MS);
     return () => clearInterval(timer);
-  }, [playerId, fetchRoom]);
+  }, [playerId, fetchRoom, room?.phase, roomClosed]);
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 200);
@@ -176,6 +200,37 @@ export default function RoomPage() {
   useEffect(() => {
     chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight });
   }, [room?.chatMessages.length]);
+
+  useEffect(() => {
+    roomRef.current = room;
+  }, [room]);
+
+  useEffect(() => {
+    playerIdRef.current = playerId;
+  }, [playerId]);
+
+  /**
+   * 탭을 닫거나 다른 페이지로 떠날 때 서버에 나갔음을 알린다. 일반 fetch는
+   * 페이지가 사라지면서 취소될 수 있으므로 sendBeacon으로 보낸다.
+   *
+   * 이미 끝난(finished/disbanded) 방은 서버가 지웠으니 보내지 않는다.
+   */
+  useEffect(() => {
+    if (!playerId) return;
+
+    function notifyLeave() {
+      const id = playerIdRef.current;
+      if (!id || roomClosedRef.current) return;
+      if (isRoomOverPhase(roomRef.current?.phase)) return;
+      navigator.sendBeacon?.(
+        `/api/rooms/${code}/leave`,
+        new Blob([JSON.stringify({ playerId: id })], { type: "application/json" }),
+      );
+    }
+
+    window.addEventListener("pagehide", notifyLeave);
+    return () => window.removeEventListener("pagehide", notifyLeave);
+  }, [code, playerId]);
 
   const join = useCallback(
     async (withId: string) => {
@@ -237,6 +292,8 @@ export default function RoomPage() {
         });
         // 나간 방의 참가자 ID는 지워, 다시 들어오면 새 참가자로 합류한다.
         clearStoredPlayerId(code);
+        // 떠나는 중에 폴링이 404를 받아 "종료됨" 화면을 띄우지 않게 막는다.
+        roomClosedRef.current = true;
       }
     } catch {
       // 나가기 요청이 실패해도 홈으로는 보내준다. 남은 참가자 쪽에서는
@@ -377,6 +434,18 @@ export default function RoomPage() {
         <p className="text-destructive">{fetchError}</p>
         <Button render={<Link href="/" />} nativeButton={false}>
           홈으로
+        </Button>
+      </div>
+    );
+  }
+
+  // 결과 화면을 받기 전에 방이 닫힌 경우(참가자가 다 나갔거나 인원 부족).
+  if (roomClosed && !room) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 py-16">
+        <p className="text-muted-foreground">이 방은 종료되어 사라졌습니다.</p>
+        <Button render={<Link href="/rooms" />} nativeButton={false}>
+          방 목록으로
         </Button>
       </div>
     );
@@ -811,9 +880,22 @@ export default function RoomPage() {
                 </span>
               </div>
             ))}
-            <Button render={<Link href="/" />} nativeButton={false} className="mt-2">
-              홈으로
-            </Button>
+            <p className="mt-1 text-center text-xs text-muted-foreground">
+              게임이 끝나 이 방은 닫혔습니다. 새로 하려면 방을 다시 만들어 주세요.
+            </p>
+            <div className="mt-1 flex gap-2">
+              <Button render={<Link href="/rooms" />} nativeButton={false} className="flex-1">
+                방 목록으로
+              </Button>
+              <Button
+                render={<Link href="/" />}
+                nativeButton={false}
+                variant="outline"
+                className="flex-1"
+              >
+                홈으로
+              </Button>
+            </div>
           </CardContent>
         </Card>
       )}

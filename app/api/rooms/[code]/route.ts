@@ -37,6 +37,7 @@ export async function DELETE(
     if ("error" in result) {
       return NextResponse.json({ error: result.error }, { status: 400 });
     }
-    return NextResponse.json({ ok: true });
+    // deleted가 true면 이 이탈로 방이 종료되어 저장소에서 사라졌다.
+    return NextResponse.json({ ok: true, deleted: result.deleted });
   });
 }
