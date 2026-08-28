@@ -19,29 +19,25 @@ import {
 import type { RankedLeaderboardEntry, RankedPage } from "@/lib/game/leaderboard";
 import { CATEGORIES, QUESTION_BANK, type Category } from "@/lib/game/questions";
 import { generateRandomNickname } from "@/lib/game/random-nickname";
+import {
+  DEFAULT_BOUNDS,
+  boundsFor,
+  randomVelocity,
+  stepWord,
+  type DriftingWord,
+} from "@/lib/game/drift";
 import { DIFFICULTY_LABEL, SINGLE_MODE_DURATION_MS, type Difficulty } from "@/lib/game/types";
 
 
-const TICK_MS = 150;
-const FALL_MIN_MS = 9_000;
-const FALL_MAX_MS = 15_000;
-const SPAWN_CHANCE_PER_TICK = 0.12;
+/**
+ * 글자를 움직이는 주기. 화면 갱신 주기(약 60fps)보다 느리게 두고, CSS
+ * transition으로 그 사이를 메워 부드럽게 보이게 한다.
+ */
+const TICK_MS = 60;
+
+const SPAWN_CHANCE_PER_TICK = 0.05;
 
 type Phase = "setup" | "playing" | "result";
-
-interface FallingWord {
-  id: string;
-  answer: string;
-  masked: string;
-  lane: number;
-  spawnedAt: number;
-  fallDurationMs: number;
-}
-
-function laneFor(index: number, total: number): number {
-  if (total <= 1) return 50;
-  return 8 + index * (84 / (total - 1));
-}
 
 interface ResultInfo {
   clearedAll: boolean;
@@ -68,12 +64,11 @@ export default function SinglePage() {
   const [nicknameError, setNicknameError] = useState<string | null>(null);
   const [category, setCategory] = useState<Category>(CATEGORIES[0]);
   const [difficulty, setDifficulty] = useState<Difficulty>("medium");
-  const [fallingWords, setFallingWords] = useState<FallingWord[]>([]);
+  const [driftingWords, setDriftingWords] = useState<DriftingWord[]>([]);
   const [clearedCount, setClearedCount] = useState(0);
   const [input, setInput] = useState("");
   const [wrongFlash, setWrongFlash] = useState(false);
   const [remainingMs, setRemainingMs] = useState(SINGLE_MODE_DURATION_MS);
-  const [now, setNow] = useState(() => Date.now());
   const [resultInfo, setResultInfo] = useState<ResultInfo | null>(null);
   const [leaderboard, setLeaderboard] = useState<RankedLeaderboardEntry[]>([]);
   const [allEntries, setAllEntries] = useState<RankedLeaderboardEntry[] | null>(null);
@@ -86,6 +81,9 @@ export default function SinglePage() {
   const sessionStartRef = useRef(0);
   const clearedCountRef = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const arenaRef = useRef<HTMLDivElement>(null);
+  /** 문제별 상자 DOM. 실제 크기를 재서 이동 범위를 좁히는 데 쓴다. */
+  const wordElementsRef = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const fetchLeaderboard = useCallback(async () => {
     try {
@@ -205,21 +203,40 @@ export default function SinglePage() {
 
     const timer = setInterval(() => {
       const nowTs = Date.now();
-      setNow(nowTs);
 
-      // 시간 안에 못 푼 문제도 사라지지 않고 화면 아래쪽에 계속 남아 기다린다.
-      setFallingWords((prev) => {
+      // 시간 안에 못 푼 문제도 사라지지 않고 화면 안을 계속 돌아다닌다.
+      setDriftingWords((prev) => {
+        const arena = arenaRef.current;
+        const containerWidth = arena?.clientWidth ?? 0;
+        const containerHeight = arena?.clientHeight ?? 0;
+        const moved = prev.map((word) => {
+          const element = wordElementsRef.current.get(word.id);
+          // 상자를 아직 그리지 않은 첫 틱에는 기본 여백으로 움직인다.
+          const bounds = element
+            ? boundsFor(element.offsetWidth, element.offsetHeight, containerWidth, containerHeight)
+            : DEFAULT_BOUNDS;
+          return stepWord(word, TICK_MS / 1000, bounds);
+        });
+
         if (poolRef.current.length > 0 && Math.random() < SPAWN_CHANCE_PER_TICK) {
           const answer = poolRef.current.shift()!;
-          const lane = laneFor(spawnedCountRef.current, totalWords);
           spawnedCountRef.current += 1;
-          const fallDurationMs = FALL_MIN_MS + Math.random() * (FALL_MAX_MS - FALL_MIN_MS);
           return [
-            ...prev,
-            { id: crypto.randomUUID(), answer, masked: maskWord(answer, difficulty), lane, spawnedAt: nowTs, fallDurationMs },
+            ...moved,
+            {
+              id: crypto.randomUUID(),
+              answer,
+              masked: maskWord(answer, difficulty),
+              // 좌상단 기준이므로 오른쪽에 너무 붙지 않게 왼쪽 절반에서
+              // 시작하고, 세로는 넓게 흩어 서로 겹치지 않게 한다.
+              // 겹쳐도 곧 각자 다른 방향으로 흩어진다.
+              x: 4 + Math.random() * 46,
+              y: 4 + Math.random() * 82,
+              ...randomVelocity(),
+            },
           ];
         }
-        return prev;
+        return moved;
       });
 
       const elapsed = nowTs - sessionStartRef.current;
@@ -253,7 +270,8 @@ export default function SinglePage() {
     spawnedCountRef.current = 0;
     sessionStartRef.current = Date.now();
     clearedCountRef.current = 0;
-    setFallingWords([]);
+    wordElementsRef.current.clear();
+    setDriftingWords([]);
     setClearedCount(0);
     setInput("");
     setResultInfo(null);
@@ -263,7 +281,7 @@ export default function SinglePage() {
 
   function submit() {
     if (input.trim() === "") return;
-    const matchIndex = fallingWords.findIndex((w) => isCorrectAnswer(input, w.answer));
+    const matchIndex = driftingWords.findIndex((w) => isCorrectAnswer(input, w.answer));
 
     if (matchIndex === -1) {
       setWrongFlash(true);
@@ -272,7 +290,7 @@ export default function SinglePage() {
       return;
     }
 
-    setFallingWords((prev) => prev.filter((_, i) => i !== matchIndex));
+    setDriftingWords((prev) => prev.filter((_, i) => i !== matchIndex));
     clearedCountRef.current += 1;
     setClearedCount(clearedCountRef.current);
     setInput("");
@@ -351,7 +369,8 @@ export default function SinglePage() {
                 </div>
               </div>
               <p className="text-sm text-muted-foreground">
-                초성 문제가 위에서 아래로 떨어져요. 바닥에 닿기 전에 정답을 입력해서 클리어하세요.
+                초성 문제가 화면 안을 돌아다녀요. 보이는 문제의 정답을 입력해서
+                클리어하세요. 못 푼 문제는 사라지지 않고 계속 남아 있어요.
                 60초 안에 카테고리 문제를 모두 클리어하면 시간이 남아도 바로 종료돼요.
               </p>
               <Button onClick={start}>시작하기</Button>
@@ -376,19 +395,34 @@ export default function SinglePage() {
                 </Button>
               </div>
             </div>
-            <div className="relative h-[420px] w-full overflow-hidden rounded-md border bg-muted/20">
-              {fallingWords.map((w) => {
-                const progress = Math.min(1, (now - w.spawnedAt) / w.fallDurationMs);
-                return (
-                  <div
-                    key={w.id}
-                    className="absolute -translate-x-1/2 rounded-md border bg-card px-3 py-1 text-lg font-bold tracking-widest shadow-sm"
-                    style={{ left: `${w.lane}%`, top: `${progress * 92}%` }}
-                  >
-                    {w.masked}
-                  </div>
-                );
-              })}
+            <div
+              ref={arenaRef}
+              className="relative h-[420px] w-full overflow-hidden rounded-md border bg-muted/20"
+            >
+              {driftingWords.map((w) => (
+                <div
+                  key={w.id}
+                  ref={(el) => {
+                    // 상자 크기를 재려면 DOM이 필요하다. 정답을 맞혀 사라진
+                    // 문제는 항목을 지워 Map이 계속 커지지 않게 한다.
+                    if (el) wordElementsRef.current.set(w.id, el);
+                    else wordElementsRef.current.delete(w.id);
+                  }}
+                  // 위치 계산은 틱마다 하고, 그 사이는 CSS transition이 메워
+                  // 부드럽게 움직이게 한다.
+                  //
+                  // 좌표는 상자 좌상단 기준이다. 상자 폭이 글자 수에 따라
+                  // 달라지므로 중심 기준으로 두면 긴 문제가 벽을 넘어 잘린다.
+                  // 좌상단 기준으로 두고 이동 범위를 상자 크기만큼 좁혀야
+                  // 어떤 길이든 화면 안에 머문다.
+                  //
+                  // whitespace-nowrap이 없으면 좁은 상자에서 글자가 세로로 접힌다.
+                  className="absolute rounded-md border bg-card px-3 py-1 text-lg font-bold whitespace-nowrap tracking-widest shadow-sm transition-[left,top] duration-[60ms] ease-linear"
+                  style={{ left: `${w.x}%`, top: `${w.y}%` }}
+                >
+                  {w.masked}
+                </div>
+              ))}
             </div>
             <form
               onSubmit={(e) => {
