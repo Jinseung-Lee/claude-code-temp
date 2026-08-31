@@ -57,7 +57,7 @@ function generateItemQuestion(
   difficulty: Difficulty,
   exclude: string[],
 ): ItemQuestionState {
-  const question = pickRandomQuestion(category, Math.random, exclude);
+  const question = pickRandomQuestion(category, Math.random, exclude, difficulty);
   const { masked, maskedIndexes } = maskWordWithIndexes(question.answer, difficulty);
   return { answer: question.answer, maskedQuestion: masked, maskedIndexes };
 }
@@ -65,7 +65,7 @@ function generateItemQuestion(
 function startNewRound(room: Room, index: number, previousAnswers: string[]): RoundState {
   const category = room.category ?? "사자성어";
   const difficulty: Difficulty = room.difficulty ?? "medium";
-  const question = pickRandomQuestion(category, Math.random, previousAnswers);
+  const question = pickRandomQuestion(category, Math.random, previousAnswers, difficulty);
   const { masked, maskedIndexes } = maskWordWithIndexes(question.answer, difficulty);
   const now = Date.now();
 

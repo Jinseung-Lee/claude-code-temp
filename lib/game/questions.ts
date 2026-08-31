@@ -1,61 +1,57 @@
+import type { Difficulty } from "./chosung";
+import { CATEGORIES, WORD_BANK, type Category, type WordEntry } from "./word-bank";
+
+export { CATEGORIES, WORD_BANK };
+export type { Category, WordEntry };
+
 export interface Question {
   category: string;
   answer: string;
 }
 
 /**
- * 사전 제작된 문제 DB. 실제 서비스에서는 외부 DB로 교체·확장하는 것을
- * 전제로 하며, 이 프로젝트에서는 지속 업데이트 가능한 시드 데이터로 둔다.
+ * 카테고리별 정답 목록. 난이도를 구분하지 않는 전체 풀이며, 단어 수를
+ * 세거나 전체를 순회하는 곳에서 쓴다.
  */
-export const CATEGORIES = [
-  "사자성어", "속담", "동물", "음식", "도시", "수도", "과일", "색깔", "직업", "스포츠",
-] as const;
-export type Category = (typeof CATEGORIES)[number];
+export const QUESTION_BANK: Record<Category, string[]> = Object.fromEntries(
+  CATEGORIES.map((category) => [category, WORD_BANK[category].map((w) => w.answer)]),
+) as Record<Category, string[]>;
 
-export const QUESTION_BANK: Record<Category, string[]> = {
-  사자성어: [
-    "유구무언", "일석이조", "고진감래", "동상이몽", "사면초가",
-    "새옹지마", "임기응변", "청출어람", "적반하장", "우유부단",
-  ],
-  속담: [
-    "가는말이고와야오는말이곱다", "발없는말이천리간다", "티끌모아태산",
-    "우물안개구리", "빈수레가요란하다", "등잔밑이어둡다",
-  ],
-  동물: [
-    "고슴도치", "너구리", "코알라", "물개", "펭귄", "다람쥐", "고양이", "호랑이",
-  ],
-  음식: [
-    "떡볶이", "비빔밥", "삼겹살", "된장찌개", "김치찌개", "잡채", "순대", "만두",
-  ],
-  도시: [
-    "서울", "부산", "인천", "대구", "대전", "광주", "울산", "수원",
-  ],
-  수도: [
-    "도쿄", "베이징", "런던", "파리", "로마", "모스크바", "베를린", "마드리드",
-  ],
-  과일: [
-    "사과", "바나나", "포도", "수박", "딸기", "오렌지", "키위", "망고",
-  ],
-  색깔: [
-    "빨강", "파랑", "노랑", "초록", "보라", "주황", "분홍", "검정",
-  ],
-  직업: [
-    "의사", "교사", "경찰", "소방관", "요리사", "변호사", "가수", "화가",
-  ],
-  스포츠: [
-    "축구", "야구", "농구", "배구", "수영", "테니스", "골프", "탁구",
-  ],
-};
+function bankFor(category: string): WordEntry[] {
+  return WORD_BANK[category as Category] ?? WORD_BANK.사자성어;
+}
+
+/**
+ * 난이도에 해당하는 단어만 남긴 정답 목록.
+ *
+ * 난이도는 두 축으로 작동한다. 마스킹 비율은 chosung.ts가 담당하고,
+ * 여기서는 단어 자체의 난이도(WordEntry.level)로 출제 범위를 좁힌다.
+ * 상위 난이도는 하위 난이도 단어까지 포함해, 어려운 방에서도 쉬운 단어가
+ * 섞여 나오도록 한다.
+ */
+export function wordsFor(category: string, difficulty?: Difficulty): string[] {
+  const entries = bankFor(category);
+  if (!difficulty) return entries.map((w) => w.answer);
+
+  const allowed: Record<Difficulty, WordEntry["level"][]> = {
+    easy: ["easy"],
+    medium: ["easy", "medium"],
+    hard: ["easy", "medium", "hard"],
+  };
+  const levels = allowed[difficulty];
+  return entries.filter((w) => levels.includes(w.level)).map((w) => w.answer);
+}
 
 export function pickRandomQuestion(
   category: string,
   rng: () => number = Math.random,
   exclude: string[] = [],
+  difficulty?: Difficulty,
 ): Question {
-  const pool = (QUESTION_BANK[category as Category] ?? QUESTION_BANK.사자성어).filter(
-    (word) => !exclude.includes(word),
-  );
-  const source = pool.length > 0 ? pool : QUESTION_BANK[category as Category] ?? QUESTION_BANK.사자성어;
+  const words = wordsFor(category, difficulty);
+  const pool = words.filter((word) => !exclude.includes(word));
+  // 이미 낸 문제를 다 소진했으면 중복을 허용하더라도 문제는 계속 내야 한다.
+  const source = pool.length > 0 ? pool : words;
   const index = Math.min(Math.floor(rng() * source.length), source.length - 1);
   return { category, answer: source[index] };
 }

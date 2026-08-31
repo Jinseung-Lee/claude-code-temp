@@ -17,7 +17,7 @@ import {
   rememberNickname,
 } from "@/lib/game/client-storage";
 import type { RankedLeaderboardEntry, RankedPage } from "@/lib/game/leaderboard";
-import { CATEGORIES, QUESTION_BANK, type Category } from "@/lib/game/questions";
+import { CATEGORIES, wordsFor, type Category } from "@/lib/game/questions";
 import { generateRandomNickname } from "@/lib/game/random-nickname";
 import { DIFFICULTY_LABEL, SINGLE_MODE_DURATION_MS, type Difficulty } from "@/lib/game/types";
 
@@ -201,7 +201,7 @@ export default function SinglePage() {
 
   useEffect(() => {
     if (phase !== "playing") return;
-    const totalWords = QUESTION_BANK[category].length;
+    const totalWords = wordsFor(category, difficulty).length;
 
     const timer = setInterval(() => {
       const nowTs = Date.now();
@@ -249,7 +249,7 @@ export default function SinglePage() {
     setNicknameError(null);
     rememberNickname(trimmed);
 
-    poolRef.current = shuffled(QUESTION_BANK[category]);
+    poolRef.current = shuffled(wordsFor(category, difficulty));
     spawnedCountRef.current = 0;
     sessionStartRef.current = Date.now();
     clearedCountRef.current = 0;
@@ -277,7 +277,7 @@ export default function SinglePage() {
     setClearedCount(clearedCountRef.current);
     setInput("");
 
-    const totalWords = QUESTION_BANK[category].length;
+    const totalWords = wordsFor(category, difficulty).length;
     if (clearedCountRef.current >= totalWords) {
       finishSession(true, Date.now() - sessionStartRef.current);
     }
@@ -366,7 +366,7 @@ export default function SinglePage() {
           <div className="flex w-full flex-col gap-3">
             <div className="flex items-center justify-between gap-2 text-sm">
               <span>
-                클리어 <strong>{clearedCount}</strong> / {QUESTION_BANK[category].length}
+                클리어 <strong>{clearedCount}</strong> / {wordsFor(category, difficulty).length}
               </span>
               <div className="flex items-center gap-2">
                 <span className="text-muted-foreground">{Math.ceil(remainingMs / 1000)}초</span>

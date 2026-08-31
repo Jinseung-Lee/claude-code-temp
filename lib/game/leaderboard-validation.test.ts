@@ -5,14 +5,14 @@ import {
   createInMemoryLeaderboardBackend,
   setLeaderboardBackend,
 } from "./leaderboard-repository";
-import { QUESTION_BANK } from "./questions";
+import { wordsFor } from "./questions";
 import { SINGLE_MODE_DURATION_MS } from "./types";
 
 /**
  * 기록 제출 API의 입력 검증. 클라이언트가 보낸 값을 그대로 믿으면 조작된
  * 기록이 랭킹 상위를 차지하므로, 문제 수와 제한시간으로 상한을 확인한다.
  */
-const ANIMAL_TOTAL = QUESTION_BANK["동물"].length;
+const ANIMAL_TOTAL = wordsFor("동물", "easy").length;
 
 function submit(body: Record<string, unknown>) {
   return POST(

@@ -5,7 +5,7 @@ import {
   getTopEntries,
   submitLeaderboardResult,
 } from "@/lib/game/leaderboard";
-import { CATEGORIES, QUESTION_BANK, type Category } from "@/lib/game/questions";
+import { CATEGORIES, wordsFor } from "@/lib/game/questions";
 import { SINGLE_MODE_DURATION_MS, type Difficulty } from "@/lib/game/types";
 
 const DIFFICULTIES: Difficulty[] = ["easy", "medium", "hard"];
@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
   if (!DIFFICULTIES.includes(difficulty as Difficulty)) {
     return NextResponse.json({ error: "잘못된 난이도입니다." }, { status: 400 });
   }
-  const totalQuestions = QUESTION_BANK[category as Category].length;
+  const totalQuestions = wordsFor(category as string, difficulty as Difficulty).length;
   if (
     typeof clearedCount !== "number" ||
     !Number.isInteger(clearedCount) ||
