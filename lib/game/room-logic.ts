@@ -4,9 +4,11 @@ import { pickRandomQuestion } from "./questions";
 import { computeRanking } from "./ranking";
 import {
   CHAT_HISTORY_LIMIT,
+  ENDED_ROOM_RETENTION_MS,
   DELAY_ITEM_MS,
   LOBBY_IDLE_TIMEOUT_MS,
   MAX_PLAYERS,
+  MIN_PLAYERS,
   ROUND_DURATION_MS,
   ROUND_RESULT_MS,
   TOTAL_ROUNDS,
@@ -117,6 +119,7 @@ export function tick(room: Room): void {
   if (room.phase === "lobby" && now - room.lastActivityAt >= LOBBY_IDLE_TIMEOUT_MS) {
     room.phase = "disbanded";
     room.endReason = "idle_disbanded";
+    room.lastActivityAt = now;
     return;
   }
 
@@ -127,6 +130,8 @@ export function tick(room: Room): void {
   ) {
     room.phase = "finished";
     room.endReason = "last_player_standing";
+    // 종료 시각을 찍어, 결과를 볼 보관 시간이 이 시점부터 시작되게 한다.
+    room.lastActivityAt = now;
     return;
   }
 
@@ -164,6 +169,7 @@ export function tick(room: Room): void {
     if (round?.resultUntil !== null && round?.resultUntil !== undefined && now >= round.resultUntil) {
       if (room.currentRoundIndex + 1 >= TOTAL_ROUNDS) {
         room.phase = "finished";
+        room.lastActivityAt = now;
       } else {
         const previousAnswers = room.rounds.map((r) => r.answer);
         room.currentRoundIndex += 1;
@@ -233,8 +239,9 @@ export function removePlayer(room: Room, playerId: string): { ok: true } | { err
 
   if (room.players.length === 0) {
     // 아무도 남지 않은 방은 목록에서 감추고 다시 들어올 수 없게 한다.
+    // 무응답 해체와 사유를 구분해, 안내 문구가 실제 원인과 맞게 한다.
     room.phase = "disbanded";
-    room.endReason = "idle_disbanded";
+    room.endReason = "all_left";
     return { ok: true };
   }
 
@@ -253,6 +260,31 @@ export function removePlayer(room: Room, playerId: string): { ok: true } | { err
   return { ok: true };
 }
 
+/**
+ * 방이 끝났는지 여부. `finished`와 `disbanded`는 더 진행될 일이 없는
+ * 종착 상태다. 페이즈 판정 자체는 `tick`과 `removePlayer`가 하고, 여기서는
+ * 결과만 읽는다.
+ */
+export function isRoomOver(room: Room): boolean {
+  return room.phase === "finished" || room.phase === "disbanded";
+}
+
+/**
+ * 방을 저장소에서 지워도 되는지 판단한다.
+ *
+ * 종착 상태가 되자마자 지우면 참가자의 다음 폴링이 404를 받아, 최종 순위
+ * (`finished`)나 해체 사유(`disbanded`)를 볼 기회 없이 화면이 "사라진 방"
+ * 으로 덮인다. 특히 게임 중 상대가 나가 1인 승리로 끝난 경우, 남은 사람은
+ * 자기가 이겼다는 결과를 보지 못한다.
+ *
+ * 그래서 종료 시각으로부터 일정 시간이 지난 뒤에 지운다. 결과를 확인할
+ * 시간은 주면서도, 끝난 방이 저장소에 계속 쌓이지는 않게 한다.
+ */
+export function isRoomDeletable(room: Room, now: number = Date.now()): boolean {
+  if (!isRoomOver(room)) return false;
+  return now - room.lastActivityAt >= ENDED_ROOM_RETENTION_MS;
+}
+
 export function beginGame(
   room: Room,
   actorId: string,
@@ -261,7 +293,8 @@ export function beginGame(
 ): { ok: true } | { error: string } {
   if (room.hostId !== actorId) return { error: "방장만 게임을 시작할 수 있습니다." };
   if (room.phase !== "lobby") return { error: "이미 게임이 시작되었습니다." };
-  if (room.players.length < 2) return { error: "2명 이상 모여야 시작할 수 있습니다." };
+  if (room.players.length < MIN_PLAYERS)
+    return { error: `${MIN_PLAYERS}명 이상 모여야 시작할 수 있습니다.` };
 
   room.category = category;
   room.difficulty = difficulty;

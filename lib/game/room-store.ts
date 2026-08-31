@@ -5,6 +5,7 @@ import {
   applyItemQuestionAnswer,
   beginGame,
   generateRoomCode,
+  isRoomDeletable,
   makeRoom,
   removePlayer,
   serializeForPlayer,
@@ -12,8 +13,14 @@ import {
   tick,
   useItem,
 } from "./room-logic";
-import { insertRoom, listRecentRooms, mutateRoom } from "./room-repository";
-import { LOBBY_IDLE_TIMEOUT_MS, type Difficulty, type Player, type Room, type RoomSummary } from "./types";
+import { deleteRoom, insertRoom, listRecentRooms, mutateRoom } from "./room-repository";
+import {
+  LOBBY_IDLE_TIMEOUT_MS,
+  type Difficulty,
+  type Player,
+  type Room,
+  type RoomSummary,
+} from "./types";
 
 export { serializeForPlayer } from "./room-logic";
 
@@ -52,14 +59,23 @@ function snapshotTimeState(room: Room): string {
 /**
  * 방을 읽어 시간 기반 상태를 갱신한 뒤 돌려준다. 라운드 자동 진행이
  * 조회 시점에 일어나므로 갱신 결과도 함께 저장한다.
+ *
+ * 방이 지워도 되는 상태면(`isRoomDeletable`) 이 조회에서 저장소에서
+ * 지운다. 방은 게임 한 판 동안만 존재하므로 끝난 방을 남겨둘 이유가 없다.
+ * 삭제해도 마지막 상태를 그대로 돌려주기 때문에 참가자들은 최종 순위와
+ * 종료 사유를 볼 수 있다.
  */
 export async function getRoom(code: string): Promise<Room | undefined> {
   const outcome = await mutateRoom(code, (room) => {
     const before = snapshotTimeState(room);
     tick(room);
-    return { result: undefined, persist: snapshotTimeState(room) !== before };
+    const changed = snapshotTimeState(room) !== before;
+    return { result: { deletable: isRoomDeletable(room) }, persist: changed };
   });
-  return outcome?.room;
+
+  if (!outcome) return undefined;
+  if (outcome.result.deletable) await deleteRoom(code);
+  return outcome.room;
 }
 
 export async function joinRoom(
@@ -91,19 +107,32 @@ export async function joinRoom(
 /**
  * 참가자를 방에서 뺀다. 홈으로 나가는 버튼과 방 이탈 API가 함께 쓴다.
  * 방장 이전, 1인 생존 종료, 빈 방 해체는 모두 room-logic이 판정한다.
+ *
+ * 이 이탈로 방이 종착 상태에 도달했으면 저장소에서 지운다. `deleted`로
+ * 알려주므로 호출한 쪽은 방이 사라졌는지 알 수 있다.
+ *
+ * 없는 방에 대한 요청도 성공으로 처리한다. 나가기는 버튼과 페이지 종료
+ * 신호로 두 번 도착할 수 있고, 방이 없다는 것은 이미 원하는 상태다.
  */
 export async function leaveRoom(
   code: string,
   playerId: string,
-): Promise<{ ok: true } | { error: string }> {
+): Promise<{ ok: true; deleted: boolean; room: Room | null } | { error: string }> {
   const outcome = await mutateRoom(code, (room) => {
     const result = removePlayer(room, playerId);
     return { result, persist: !("error" in result) };
   });
 
-  if (!outcome) return { error: "존재하지 않는 방입니다." };
+  if (!outcome) return { ok: true, deleted: true, room: null };
   if ("error" in outcome.result) return { error: outcome.result.error };
-  return { ok: true };
+
+  // 방을 지우더라도 마지막 상태는 돌려준다. 남은 참가자에게 결과 화면을
+  // 보여주려면 삭제 직전 상태가 필요하다.
+  if (isRoomDeletable(outcome.room)) {
+    await deleteRoom(code);
+    return { ok: true, deleted: true, room: outcome.room };
+  }
+  return { ok: true, deleted: false, room: outcome.room };
 }
 
 export async function startGame(
@@ -185,6 +214,12 @@ export async function applyItemUse(
   return outcome.room;
 }
 
+/** 해체 사유를 그대로 알린다. 원인이 다른데 같은 문구를 쓰면 오해를 준다. */
+function disbandedMessage(room: Room): string {
+  if (room.endReason === "all_left") return "참가자가 모두 나가 방이 해체되었습니다.";
+  return `${LOBBY_IDLE_TIMEOUT_MS / 1000}초 동안 활동이 없어 방이 해체되었습니다.`;
+}
+
 /** 방을 읽고 요청자 시점 뷰까지 한 번에 만든다. 폴링 응답에 쓴다. */
 export async function getRoomView(
   code: string,
@@ -196,7 +231,7 @@ export async function getRoomView(
   const room = await getRoom(code);
   if (!room) return { error: "존재하지 않는 방입니다.", status: 404 };
   if (room.phase === "disbanded") {
-    return { error: "20초 동안 활동이 없어 방이 해체되었습니다.", status: 410 };
+    return { error: disbandedMessage(room), status: 410 };
   }
   if (!room.players.some((p) => p.id === playerId)) {
     return { error: "이 방의 참가자가 아닙니다.", status: 403 };

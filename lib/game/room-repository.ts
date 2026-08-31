@@ -58,6 +58,8 @@ export interface RoomBackend {
   saveIfUnchanged(room: Room, expectedVersion: number): Promise<boolean>;
   /** 최근에 갱신된 방을 최신순으로 최대 limit개 돌려준다. */
   listRecent(limit: number): Promise<Room[]>;
+  /** 방을 지운다. 이미 없으면 조용히 넘어간다. */
+  remove(code: string): Promise<void>;
 }
 
 interface RoomRow {
@@ -145,6 +147,15 @@ const supabaseBackend: RoomBackend = {
     if (error) throw new Error(`방 목록 조회에 실패했습니다: ${error.message}`);
     return (data ?? []).map((row) => (row as { state: Room }).state);
   },
+
+  async remove(code) {
+    const { error } = await getClient()
+      .from(ROOMS_TABLE)
+      .delete()
+      .eq("code", code.toUpperCase());
+
+    if (error) throw new Error(`방 삭제에 실패했습니다: ${error.message}`);
+  },
 };
 
 /**
@@ -178,6 +189,9 @@ export function createInMemoryRoomBackend(): RoomBackend {
         .map((row) => clone(row.state))
         .reverse()
         .slice(0, limit);
+    },
+    async remove(code) {
+      rows.delete(code.toUpperCase());
     },
   };
 }
@@ -256,6 +270,11 @@ export async function insertRoom(room: Room): Promise<boolean> {
 
 export async function listRecentRooms(limit: number): Promise<Room[]> {
   return resolveBackend().listRecent(limit);
+}
+
+/** 방을 저장소에서 지운다. 이미 지워졌더라도 오류로 보지 않는다. */
+export async function deleteRoom(code: string): Promise<void> {
+  await resolveBackend().remove(code);
 }
 
 /**

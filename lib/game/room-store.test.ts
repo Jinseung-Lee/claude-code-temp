@@ -16,14 +16,17 @@ import {
 import {
   createInMemoryRoomBackend,
   isEphemeralStorageUnsafe,
+  loadRoom,
   mutateRoom,
   setRoomBackend,
 } from "./room-repository";
 import {
   DELAY_ITEM_MS,
+  ENDED_ROOM_RETENTION_MS,
   LOBBY_IDLE_TIMEOUT_MS,
   ROUND_DURATION_MS,
   ROUND_RESULT_MS,
+  TOTAL_ROUNDS,
   type ItemType,
   type Room,
 } from "./types";
@@ -427,14 +430,16 @@ describe("listRooms", () => {
   it("끝난 방은 목록에서 제외한다", async () => {
     const { code, host } = await setup(2);
     // 10라운드를 모두 소진해 finished로 만든다.
-    for (let i = 0; i < 10; i += 1) {
+    let lastPhase = "";
+    for (let i = 0; i < TOTAL_ROUNDS; i += 1) {
       const live = await getRoom(code);
       if (live?.phase !== "round_active") break;
       await submitAnswer(code, host.id, live.rounds[live.currentRoundIndex].answer);
       vi.setSystemTime(Date.now() + ROUND_RESULT_MS + 1);
-      await getRoom(code);
+      lastPhase = (await getRoom(code))?.phase ?? "";
     }
-    expect((await getRoom(code))!.phase).toBe("finished");
+    // 마지막 라운드를 끝낸 조회가 finished를 돌려주고, 그 시점에 방이 지워진다.
+    expect(lastPhase).toBe("finished");
     expect((await listRooms()).some((r) => r.code === code)).toBe(false);
   });
 
@@ -468,7 +473,8 @@ describe("leaveRoom", () => {
     const { code, host, others } = await setup(3);
 
     const left = await leaveRoom(code, others[0].id);
-    expect(left).toEqual({ ok: true });
+    // 3명 중 1명이 나가도 게임은 이어지므로 방은 남는다.
+    expect(left).toMatchObject({ ok: true, deleted: false });
 
     const room = await getRoom(code);
     expect(room!.players.map((p) => p.id)).toEqual([host.id, others[1].id]);
@@ -477,13 +483,16 @@ describe("leaveRoom", () => {
   it("게임 중 1명만 남으면 즉시 종료하고 남은 1명이 승리한다", async () => {
     const { code, host, others } = await setup(2);
 
-    await leaveRoom(code, others[0].id);
+    const left = await leaveRoom(code, others[0].id);
+    if ("error" in left) throw new Error(left.error);
+    // 남은 사람이 결과를 볼 수 있어야 하므로 방은 아직 지워지지 않는다.
+    expect(left.deleted).toBe(false);
 
-    const room = await getRoom(code);
-    expect(room!.phase).toBe("finished");
-    expect(room!.endReason).toBe("last_player_standing");
+    const room = (await getRoom(code))!;
+    expect(room.phase).toBe("finished");
+    expect(room.endReason).toBe("last_player_standing");
 
-    const view = serializeForPlayer(room!, host.id);
+    const view = serializeForPlayer(room, host.id);
     expect(view.ranking).not.toBeNull();
     expect(view.ranking![0].id).toBe(host.id);
     expect(view.ranking![0].rank).toBe(1);
@@ -604,5 +613,165 @@ describe("summarizeRoom: 방 목록 참가자", () => {
     const [summary] = await listRooms();
     expect(summary.players[0]).toMatchObject({ nickname: "guest1", rank: 1, roundWins: 1 });
     expect(summary.players[1]).toMatchObject({ nickname: "host", rank: 2, roundWins: 0 });
+  });
+});
+
+describe("종료된 방 삭제", () => {
+  /** 마지막 라운드까지 시간을 흘려 10라운드를 모두 끝낸다. */
+  async function playToFinish(code: string): Promise<void> {
+    for (let round = 0; round < TOTAL_ROUNDS; round += 1) {
+      vi.setSystemTime(Date.now() + ROUND_DURATION_MS + 1);
+      await getRoom(code);
+      vi.setSystemTime(Date.now() + ROUND_RESULT_MS + 1);
+      await getRoom(code);
+    }
+  }
+
+  it("10라운드가 끝난 방은 결과를 볼 시간이 지난 뒤에 지워진다", async () => {
+    const { code } = await setup(2);
+
+    await playToFinish(code);
+    // 끝난 직후에는 최종 순위를 볼 수 있어야 하므로 남아 있다.
+    expect(await loadRoom(code)).not.toBeNull();
+
+    vi.setSystemTime(Date.now() + ENDED_ROOM_RETENTION_MS + 1);
+    await getRoom(code);
+
+    expect(await loadRoom(code)).toBeNull();
+  });
+
+  it("방을 지우는 조회에서도 최종 순위를 볼 수 있는 상태를 돌려준다", async () => {
+    const { code, host } = await setup(2);
+    for (let round = 0; round < TOTAL_ROUNDS - 1; round += 1) {
+      vi.setSystemTime(Date.now() + ROUND_DURATION_MS + 1);
+      await getRoom(code);
+      vi.setSystemTime(Date.now() + ROUND_RESULT_MS + 1);
+      await getRoom(code);
+    }
+
+    vi.setSystemTime(Date.now() + ROUND_DURATION_MS + 1);
+    await getRoom(code);
+    vi.setSystemTime(Date.now() + ROUND_RESULT_MS + 1);
+    const finished = (await getRoom(code))!;
+
+    // 끝난 직후 폴링에서 순위를 볼 수 있어야 한다.
+    expect(finished.phase).toBe("finished");
+    expect(serializeForPlayer(finished, host.id).ranking).not.toBeNull();
+    expect(await loadRoom(code)).not.toBeNull();
+  });
+
+  it("게임 중 1명만 남아 종료되면 남은 사람이 결과를 볼 수 있게 남긴다", async () => {
+    const { code, host, others } = await setup(2);
+
+    const result = await leaveRoom(code, others[0].id);
+
+    expect(result).toMatchObject({ ok: true, deleted: false });
+    // 남은 사람의 폴링이 404가 아니라 1인 승리 결과를 받아야 한다.
+    const view = await getRoomView(code, host.id);
+    expect("view" in view && view.view.phase).toBe("finished");
+    expect("view" in view && view.view.ranking?.[0]?.id).toBe(host.id);
+  });
+
+  it("1인 승리 종료도 보관 시간이 지나면 지워진다", async () => {
+    const { code, others } = await setup(2);
+    await leaveRoom(code, others[0].id);
+
+    vi.setSystemTime(Date.now() + ENDED_ROOM_RETENTION_MS + 1);
+    await getRoom(code);
+
+    expect(await loadRoom(code)).toBeNull();
+  });
+
+  it("모두 나가 해체된 방은 사유를 알릴 수 있도록 잠시 남긴다", async () => {
+    const { room, player: host } = await createRoom("혼자");
+
+    const result = await leaveRoom(room.code, host.id);
+
+    // 바로 지우면 "해체됨"과 "없는 방"을 구분할 수 없다.
+    expect(result).toMatchObject({ ok: true, deleted: false });
+    expect(await loadRoom(room.code)).not.toBeNull();
+    expect((await getRoomView(room.code, host.id) as { status: number }).status).toBe(410);
+  });
+
+  it("전원 이탈과 무응답 해체를 서로 다른 사유로 알린다", async () => {
+    const { room: left, player: soloHost } = await createRoom("혼자");
+    await leaveRoom(left.code, soloHost.id);
+    const leftView = await getRoomView(left.code, soloHost.id);
+    expect("error" in leftView && leftView.error).toContain("모두 나가");
+
+    const { room: idle, player: idleHost } = await createRoom("방치");
+    vi.setSystemTime(BASE_TIME + LOBBY_IDLE_TIMEOUT_MS + 1);
+    const idleView = await getRoomView(idle.code, idleHost.id);
+    expect("error" in idleView && idleView.error).toContain("활동이 없어");
+  });
+
+  it("해체 후 보관 시간이 지나면 방을 지운다", async () => {
+    const { room, player: host } = await createRoom("혼자");
+    await leaveRoom(room.code, host.id);
+
+    vi.setSystemTime(Date.now() + ENDED_ROOM_RETENTION_MS + 1);
+    await getRoom(room.code);
+
+    expect(await loadRoom(room.code)).toBeNull();
+  });
+
+  it("대기실 무응답 해체도 보관 시간이 지난 뒤에 지운다", async () => {
+    const { room } = await createRoom("호스트");
+    const joined = await joinRoom(room.code, "게스트");
+    if ("error" in joined) throw joined;
+
+    vi.setSystemTime(BASE_TIME + LOBBY_IDLE_TIMEOUT_MS + 1);
+    const ticked = (await getRoom(room.code))!;
+    expect(ticked.phase).toBe("disbanded");
+    // 해체 직후에는 사유를 알려줄 수 있어야 하므로 아직 남아 있다.
+    expect(await loadRoom(room.code)).not.toBeNull();
+
+    vi.setSystemTime(Date.now() + ENDED_ROOM_RETENTION_MS + 1);
+    await getRoom(room.code);
+    expect(await loadRoom(room.code)).toBeNull();
+  });
+
+  it("게임이 계속되는 이탈에서는 방을 지우지 않는다", async () => {
+    const { code, others } = await setup(3);
+
+    const result = await leaveRoom(code, others[0].id);
+
+    expect(result).toMatchObject({ ok: true, deleted: false });
+    const reloaded = (await getRoom(code))!;
+    expect(reloaded.phase).toBe("round_active");
+    expect(reloaded.players).toHaveLength(2);
+  });
+
+  it("로비에 1명이 남는 이탈에서는 방을 지우지 않는다", async () => {
+    const { room } = await createRoom("호스트");
+    const joined = await joinRoom(room.code, "게스트");
+    if ("error" in joined) throw joined;
+
+    const result = await leaveRoom(room.code, joined.player.id);
+
+    expect(result).toMatchObject({ ok: true, deleted: false });
+    expect(await loadRoom(room.code)).not.toBeNull();
+  });
+
+  it("이미 지워진 방에 나가기를 보내도 오류가 아니다", async () => {
+    const { code, others } = await setup(2);
+    await leaveRoom(code, others[0].id);
+    vi.setSystemTime(Date.now() + ENDED_ROOM_RETENTION_MS + 1);
+    await getRoom(code); // 보관 시간이 지나 삭제된다
+    expect(await loadRoom(code)).toBeNull();
+
+    // 버튼 클릭과 페이지 종료 신호가 겹쳐 두 번 도착하는 상황이다.
+    const again = await leaveRoom(code, others[0].id);
+
+    expect(again).toMatchObject({ ok: true, deleted: true });
+  });
+
+  it("지워진 방은 목록에도 남지 않는다", async () => {
+    const { code } = await setup(2);
+    await playToFinish(code);
+
+    const rooms = await listRooms();
+
+    expect(rooms.map((r) => r.code)).not.toContain(code);
   });
 });

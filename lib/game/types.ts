@@ -85,6 +85,8 @@ export const DIFFICULTY_LABEL: Record<Difficulty, string> = {
 };
 
 export const MAX_PLAYERS = 4;
+/** 멀티모드가 성립하는 최소 인원. 이 아래로 줄면 게임을 이어갈 수 없다. */
+export const MIN_PLAYERS = 2;
 export const TOTAL_ROUNDS = 10;
 export const ROUND_DURATION_MS = 15_000;
 export const ROUND_RESULT_MS = 3_000;
@@ -98,6 +100,15 @@ export const CHAT_HISTORY_LIMIT = 100;
  * 보낸다. 방을 만들어 두고 방치한 방이 목록에 남는 것을 막는다.
  */
 export const LOBBY_IDLE_TIMEOUT_MS = 20_000;
+
+/**
+ * 끝난 방을 저장소에 남겨두는 시간.
+ *
+ * 방이 종료되는 순간 지워버리면 참가자의 다음 폴링이 곧바로 404를 받아,
+ * 최종 순위나 해체 사유를 볼 기회 없이 화면이 "사라진 방"으로 덮인다.
+ * 결과를 확인할 시간을 준 뒤에 지운다.
+ */
+export const ENDED_ROOM_RETENTION_MS = 5 * 60_000;
 
 export interface Room {
   code: string;
@@ -120,8 +131,9 @@ export interface Room {
  * 방이 10라운드를 다 돌지 않고 끝난 이유.
  * - `last_player_standing`: 이탈로 1명만 남아 그 1명의 승리로 끝났다.
  * - `idle_disbanded`: 대기실에서 무응답 시간이 지나 방이 해체되었다.
+ * - `all_left`: 참가자가 모두 나가 방이 해체되었다.
  */
-export type RoomEndReason = "last_player_standing" | "idle_disbanded";
+export type RoomEndReason = "last_player_standing" | "idle_disbanded" | "all_left";
 
 export interface RankedPlayer {
   id: string;
